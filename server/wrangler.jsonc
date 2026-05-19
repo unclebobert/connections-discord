@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "server",
+  "name": "connections-discord-server",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-19",
   "observability": {
