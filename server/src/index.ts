@@ -12,7 +12,7 @@ const app = new Hono<{ Bindings: Bindings }>();
 // i.e. the client should always prepend /api before making requests to the server,
 // but the server should not include /api in its routes
 app.post('/token', async (c) => {
-  const { code } = await c.req.json();
+  const { code } = await c.req.json().catch(() => undefined);
   if (!code || typeof code !== 'string') {
     return c.json({ error: 'Invalid code' }, 400);
   }
