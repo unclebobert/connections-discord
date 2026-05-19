@@ -6,7 +6,7 @@
     "strict": true,
     "skipLibCheck": true,
     "lib": [
-      "ESNext"
+      "DOM" // Use DOM library for URLSearchParams and other web APIs available in Cloudflare Workers
     ],
     "jsx": "react-jsx",
     "jsxImportSource": "hono/jsx"
