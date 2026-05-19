@@ -2,7 +2,10 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "server",
   "main": "src/index.ts",
-  "compatibility_date": "2026-05-19"
+  "compatibility_date": "2026-05-19",
+  "observability": {
+    "enabled": true
+  }
   // "compatibility_flags": [
   //   "nodejs_compat"
   // ],
@@ -31,8 +34,4 @@
   // "ai": {
   //   "binding": "AI"
   // },
-  // "observability": {
-  //   "enabled": true,
-  //   "head_sampling_rate": 1
-  // }
 }
