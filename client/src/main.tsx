@@ -6,15 +6,24 @@ import './index.css'
 import App from './App.tsx'
 
 // Will eventually store the authenticated user's access_token
-let auth: null | Awaited<ReturnType<typeof discordSDK.commands.authenticate>> = null;
+let auth: null | Awaited<ReturnType<DiscordSDK['commands']['authenticate']>> = null
 
-const discordSDK = new DiscordSDK(import.meta.env.VITE_CLIENT_ID)
+const discordSDK = import.meta.env.DEV ?
+  null :
+  new DiscordSDK(import.meta.env.VITE_CLIENT_ID)
 
-setupDiscordSDK().then(() => {
-  console.log("Discord SDK is authenticated");
-});
+setupDiscordSDK()
+  .then(() => console.log("Discord SDK is authenticated"))
+  .catch(e => {
+    if (e instanceof Error && e.message === "Discord SDK is not being used in this environment") {
+      console.log("Dev environment: Discord SDK not initialized");
+    }
+  });
 
 async function setupDiscordSDK() {
+  if (!discordSDK) {
+    throw new Error("Discord SDK is not being used in this environment");
+  }
   await discordSDK.ready()
   console.log('Discord SDK is ready!')
 
