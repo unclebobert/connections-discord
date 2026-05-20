@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import connectionsLogo from './assets/connections.svg'
 import './App.css'
 
 import { type GameCategory, type PlayCard, type GameData, API_BASE_URL } from './lib'
 
-
 const MAX_MISTAKES = 4
+const GUESS_ANIMATION_MS = 520
 
 const categoryColors = [
   'category-yellow',
@@ -47,6 +48,10 @@ function formatPuzzleDate(date: Date) {
   return `${year}-${month}-${day}`
 }
 
+function getCardTransitionName(card: PlayCard) {
+  return `card-${card.categoryIndex}-${card.position}`
+}
+
 function App() {
   const [data, setData] = useState<GameData | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -56,6 +61,10 @@ function App() {
   const [mistakesRemaining, setMistakesRemaining] = useState(MAX_MISTAKES)
   const [message, setMessage] = useState('Select four words that share a connection.')
   const [isGameOver, setIsGameOver] = useState(false)
+  const [guessAnimation, setGuessAnimation] = useState<'correct' | 'incorrect' | null>(null)
+  const [poppedCardId, setPoppedCardId] = useState<string | null>(null)
+  const [feedbackKey, setFeedbackKey] = useState(0)
+  const animationTimers = useRef<number[]>([])
 
   useEffect(() => {
     const today = new Date()
@@ -77,6 +86,12 @@ function App() {
         console.error('Error fetching data:', fetchError)
         setError('Could not load today\'s Connections puzzle.')
       })
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      animationTimers.current.forEach((timer) => window.clearTimeout(timer))
+    }
   }, [])
 
   const selectedCards = useMemo(
@@ -103,10 +118,34 @@ function App() {
     (card) => !visibleSolvedCategories.includes(card.categoryIndex),
   )
 
+  function queueAnimation(callback: () => void, delay: number) {
+    const timer = window.setTimeout(callback, delay)
+    animationTimers.current.push(timer)
+  }
+
+  function showMessage(nextMessage: string) {
+    setMessage(nextMessage)
+    setFeedbackKey((currentKey) => currentKey + 1)
+  }
+
+  function updateLayout(update: () => void) {
+    if (!document.startViewTransition) {
+      update()
+      return
+    }
+
+    document.startViewTransition(() => {
+      flushSync(update)
+    })
+  }
+
   function toggleCard(cardId: string) {
     if (isGameOver || isWon) {
       return
     }
+
+    setPoppedCardId(cardId)
+    queueAnimation(() => setPoppedCardId(null), 180)
 
     setSelectedIds((currentSelection) => {
       if (currentSelection.includes(cardId)) {
@@ -123,7 +162,7 @@ function App() {
 
   function deselectAll() {
     setSelectedIds([])
-    setMessage('Select four words that share a connection.')
+    showMessage('Select four words that share a connection.')
   }
 
   function shuffleBoard() {
@@ -131,8 +170,10 @@ function App() {
     const solvedCards = boardCards.filter((card) => solvedSet.has(card.categoryIndex))
     const cardsToShuffle = boardCards.filter((card) => !solvedSet.has(card.categoryIndex))
 
-    setBoardCards([...solvedCards, ...shuffleCards(cardsToShuffle)])
-    setSelectedIds([])
+    updateLayout(() => {
+      setBoardCards([...solvedCards, ...shuffleCards(cardsToShuffle)])
+      setSelectedIds([])
+    })
   }
 
   function submitSelection() {
@@ -145,14 +186,21 @@ function App() {
 
     if (isCorrect) {
       const nextSolvedCategories = [...solvedCategories, categoryIndex]
-      setSolvedCategories(nextSolvedCategories)
-      setSelectedIds([])
+      setGuessAnimation('correct')
 
       if (nextSolvedCategories.length === data.categories.length) {
-        setMessage('You found every connection.')
+        showMessage('You found every connection.')
       } else {
-        setMessage('Nice.')
+        showMessage('Nice.')
       }
+
+      queueAnimation(() => {
+        updateLayout(() => {
+          setSolvedCategories(nextSolvedCategories)
+          setSelectedIds([])
+          setGuessAnimation(null)
+        })
+      }, 260)
 
       return
     }
@@ -165,13 +213,23 @@ function App() {
     const nextMistakesRemaining = mistakesRemaining - 1
 
     setMistakesRemaining(nextMistakesRemaining)
-    setSelectedIds([])
+    setGuessAnimation('incorrect')
 
     if (nextMistakesRemaining === 0) {
-      setIsGameOver(true)
-      setMessage('No mistakes left. Here are the answers.')
+      showMessage('No mistakes left. Here are the answers.')
+      queueAnimation(() => {
+        updateLayout(() => {
+          setIsGameOver(true)
+          setSelectedIds([])
+          setGuessAnimation(null)
+        })
+      }, GUESS_ANIMATION_MS)
     } else {
-      setMessage(wasOneAway ? 'One away...' : 'Not quite.')
+      showMessage(wasOneAway ? 'One away...' : 'Not quite.')
+      queueAnimation(() => {
+        setSelectedIds([])
+        setGuessAnimation(null)
+      }, GUESS_ANIMATION_MS)
     }
   }
 
@@ -180,12 +238,15 @@ function App() {
       return
     }
 
-    setSelectedIds([])
-    setSolvedCategories([])
-    setBoardCards(buildCards(data.categories))
-    setMistakesRemaining(MAX_MISTAKES)
-    setMessage('Select four words that share a connection.')
-    setIsGameOver(false)
+    updateLayout(() => {
+      setSelectedIds([])
+      setSolvedCategories([])
+      setBoardCards(buildCards(data.categories))
+      setMistakesRemaining(MAX_MISTAKES)
+      showMessage('Select four words that share a connection.')
+      setIsGameOver(false)
+      setGuessAnimation(null)
+    })
   }
 
   if (error) {
@@ -241,15 +302,19 @@ function App() {
         </div>
 
         {!isGameOver && !isWon ? (
-          <div className="word-grid" aria-label="Selectable words">
+          <div
+            className={`word-grid${guessAnimation ? ` ${guessAnimation}` : ''}`}
+            aria-label="Selectable words"
+          >
             {unsolvedCards.map((card) => {
               const isSelected = selectedIds.includes(card.id)
 
               return (
                 <button
-                  className={`word-card${isSelected ? ' selected' : ''}`}
+                  className={`word-card${isSelected ? ' selected' : ''}${poppedCardId === card.id ? ' popped' : ''}`}
                   key={card.id}
                   type="button"
+                  style={{ viewTransitionName: getCardTransitionName(card) }}
                   aria-pressed={isSelected}
                   onClick={() => toggleCard(card.id)}
                 >
@@ -260,7 +325,7 @@ function App() {
           </div>
         ) : null}
 
-        <p className="feedback" role="status" aria-live="polite">
+        <p className="feedback" key={feedbackKey} role="status" aria-live="polite">
           {message}
         </p>
 

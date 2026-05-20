@@ -7,7 +7,8 @@
   --heading-text: #111111;
   --muted-text: #6f6f68;
   --border: #dfdfd7;
-  --sans: Arial, Helvetica, sans-serif;
+  --sans: "Libre Franklin", Arial, Helvetica, sans-serif;
+  --title: "Old Standard TT", Georgia, serif;
 
   font: 16px/1.45 var(--sans);
   letter-spacing: 0;
@@ -41,10 +42,11 @@ p {
 }
 
 h1 {
+  font-family: var(--title);
   color: var(--heading-text);
   font-size: 32px;
   line-height: 1.1;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: 0;
 }
 
