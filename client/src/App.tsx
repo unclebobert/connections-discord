@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { flushSync } from 'react-dom'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import connectionsLogo from './assets/connections.svg'
 import './App.css'
 
 import { type GameCategory, type PlayCard, type GameData, API_BASE_URL } from './lib'
 
 const MAX_MISTAKES = 4
-const GUESS_ANIMATION_MS = 520
+const INCORRECT_GUESS_ANIMATION_MS = 1200
+const CORRECT_SWAP_ANIMATION_MS = 520
+const TOAST_MS = 1150
+const INCORRECT_JUMP_STAGGER_MS = 100
 
 const categoryColors = [
   'category-yellow',
@@ -48,23 +51,81 @@ function formatPuzzleDate(date: Date) {
   return `${year}-${month}-${day}`
 }
 
-function getCardTransitionName(card: PlayCard) {
-  return `card-${card.categoryIndex}-${card.position}`
+function getVictoryMessage(mistakesMade: number) {
+  if (mistakesMade === 0) {
+    return 'Perfect'
+  }
+
+  if (mistakesMade === 1) {
+    return 'Great'
+  }
+
+  if (mistakesMade === 2) {
+    return 'Solid'
+  }
+
+  return 'Phew'
+}
+
+function getCardId(categoryIndex: number, card: GameCategory['cards'][number]) {
+  return `${categoryIndex}-${card.position}-${card.content}`
+}
+
+function swapCategoryCardsToTopRow(
+  cards: PlayCard[],
+  category: GameCategory,
+  categoryIndex: number,
+  solvedCategories: number[],
+) {
+  const reorderedCards = [...cards]
+  const solvedSet = new Set(solvedCategories)
+  const unsolvedIndexes = reorderedCards
+    .map((card, index) => ({ card, index }))
+    .filter(({ card }) => !solvedSet.has(card.categoryIndex))
+    .map(({ index }) => index)
+
+  category.cards.forEach((card, targetOffset) => {
+    const targetIndex = unsolvedIndexes[targetOffset]
+    const cardId = getCardId(categoryIndex, card)
+    const currentIndex = reorderedCards.findIndex((boardCard) => boardCard.id === cardId)
+
+    if (targetIndex === undefined || currentIndex === -1 || currentIndex === targetIndex) {
+      return
+    }
+
+    const targetCard = reorderedCards[targetIndex]
+    reorderedCards[targetIndex] = reorderedCards[currentIndex]
+    reorderedCards[currentIndex] = targetCard
+  })
+
+  return reorderedCards
 }
 
 function App() {
+  const shouldReduceMotion = useReducedMotion()
   const [data, setData] = useState<GameData | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [hasStarted, setHasStarted] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [solvedCategories, setSolvedCategories] = useState<number[]>([])
   const [boardCards, setBoardCards] = useState<PlayCard[]>([])
   const [mistakesRemaining, setMistakesRemaining] = useState(MAX_MISTAKES)
-  const [message, setMessage] = useState('Select four words that share a connection.')
   const [isGameOver, setIsGameOver] = useState(false)
   const [guessAnimation, setGuessAnimation] = useState<'correct' | 'incorrect' | null>(null)
-  const [poppedCardId, setPoppedCardId] = useState<string | null>(null)
-  const [feedbackKey, setFeedbackKey] = useState(0)
+  const [layoutPhase, setLayoutPhase] = useState<'idle' | 'swap' | 'instant'>('idle')
+  const [toast, setToast] = useState<{ id: number; text: string } | null>(null)
   const animationTimers = useRef<number[]>([])
+  const toastTimer = useRef<number | null>(null)
+
+  const layoutDuration = shouldReduceMotion || layoutPhase === 'instant'
+    ? 0
+    : layoutPhase === 'swap'
+      ? CORRECT_SWAP_ANIMATION_MS / 1000
+      : 0.28
+  const layoutTransition = {
+    duration: layoutDuration,
+    ease: 'easeOut' as const,
+  }
 
   useEffect(() => {
     const today = new Date()
@@ -91,6 +152,10 @@ function App() {
   useEffect(() => {
     return () => {
       animationTimers.current.forEach((timer) => window.clearTimeout(timer))
+
+      if (toastTimer.current) {
+        window.clearTimeout(toastTimer.current)
+      }
     }
   }, [])
 
@@ -100,7 +165,7 @@ function App() {
   )
 
   const isWon = data !== null && solvedCategories.length === data.categories.length
-  const canSubmit = selectedIds.length === 4 && !isGameOver && !isWon
+  const canSubmit = selectedIds.length === 4 && !isGameOver && !isWon && !guessAnimation
 
   const visibleSolvedCategories = useMemo(() => {
     if (!data) {
@@ -117,35 +182,39 @@ function App() {
   const unsolvedCards = boardCards.filter(
     (card) => !visibleSolvedCategories.includes(card.categoryIndex),
   )
+  const selectedJumpOrder = useMemo(() => {
+    const selectedSet = new Set(selectedIds)
+    const jumpOrder = new Map<string, number>()
+
+    unsolvedCards.forEach((card) => {
+      if (selectedSet.has(card.id)) {
+        jumpOrder.set(card.id, jumpOrder.size)
+      }
+    })
+
+    return jumpOrder
+  }, [selectedIds, unsolvedCards])
 
   function queueAnimation(callback: () => void, delay: number) {
     const timer = window.setTimeout(callback, delay)
     animationTimers.current.push(timer)
   }
 
-  function showMessage(nextMessage: string) {
-    setMessage(nextMessage)
-    setFeedbackKey((currentKey) => currentKey + 1)
-  }
-
-  function updateLayout(update: () => void) {
-    if (!document.startViewTransition) {
-      update()
-      return
+  function showToast(text: string) {
+    if (toastTimer.current) {
+      window.clearTimeout(toastTimer.current)
     }
 
-    document.startViewTransition(() => {
-      flushSync(update)
-    })
+    setToast({ id: Date.now(), text })
+    toastTimer.current = window.setTimeout(() => {
+      setToast(null)
+    }, TOAST_MS)
   }
 
   function toggleCard(cardId: string) {
-    if (isGameOver || isWon) {
+    if (isGameOver || isWon || guessAnimation) {
       return
     }
-
-    setPoppedCardId(cardId)
-    queueAnimation(() => setPoppedCardId(null), 180)
 
     setSelectedIds((currentSelection) => {
       if (currentSelection.includes(cardId)) {
@@ -162,7 +231,6 @@ function App() {
 
   function deselectAll() {
     setSelectedIds([])
-    showMessage('Select four words that share a connection.')
   }
 
   function shuffleBoard() {
@@ -170,14 +238,12 @@ function App() {
     const solvedCards = boardCards.filter((card) => solvedSet.has(card.categoryIndex))
     const cardsToShuffle = boardCards.filter((card) => !solvedSet.has(card.categoryIndex))
 
-    updateLayout(() => {
-      setBoardCards([...solvedCards, ...shuffleCards(cardsToShuffle)])
-      setSelectedIds([])
-    })
+    setBoardCards([...solvedCards, ...shuffleCards(cardsToShuffle)])
+    setSelectedIds([])
   }
 
   function submitSelection() {
-    if (!data || selectedCards.length !== 4 || isGameOver || isWon) {
+    if (!data || selectedCards.length !== 4 || isGameOver || isWon || guessAnimation) {
       return
     }
 
@@ -186,21 +252,32 @@ function App() {
 
     if (isCorrect) {
       const nextSolvedCategories = [...solvedCategories, categoryIndex]
+      const hasWon = nextSolvedCategories.length === data.categories.length
       setGuessAnimation('correct')
+      setLayoutPhase('swap')
+      setBoardCards((currentCards) =>
+        swapCategoryCardsToTopRow(
+          currentCards,
+          data.categories[categoryIndex],
+          categoryIndex,
+          solvedCategories,
+        ),
+      )
 
-      if (nextSolvedCategories.length === data.categories.length) {
-        showMessage('You found every connection.')
-      } else {
-        showMessage('Nice.')
+      if (hasWon) {
+        showToast(getVictoryMessage(MAX_MISTAKES - mistakesRemaining))
       }
 
       queueAnimation(() => {
-        updateLayout(() => {
-          setSolvedCategories(nextSolvedCategories)
-          setSelectedIds([])
-          setGuessAnimation(null)
-        })
-      }, 260)
+        setLayoutPhase('instant')
+        setSolvedCategories(nextSolvedCategories)
+        setSelectedIds([])
+        setGuessAnimation(null)
+
+        queueAnimation(() => {
+          setLayoutPhase('idle')
+        }, 40)
+      }, shouldReduceMotion ? 0 : CORRECT_SWAP_ANIMATION_MS)
 
       return
     }
@@ -215,22 +292,18 @@ function App() {
     setMistakesRemaining(nextMistakesRemaining)
     setGuessAnimation('incorrect')
 
-    if (nextMistakesRemaining === 0) {
-      showMessage('No mistakes left. Here are the answers.')
-      queueAnimation(() => {
-        updateLayout(() => {
-          setIsGameOver(true)
-          setSelectedIds([])
-          setGuessAnimation(null)
-        })
-      }, GUESS_ANIMATION_MS)
-    } else {
-      showMessage(wasOneAway ? 'One away...' : 'Not quite.')
-      queueAnimation(() => {
-        setSelectedIds([])
-        setGuessAnimation(null)
-      }, GUESS_ANIMATION_MS)
+    if (wasOneAway) {
+      showToast('One away...')
     }
+
+    queueAnimation(() => {
+      setSelectedIds([])
+      setGuessAnimation(null)
+
+      if (nextMistakesRemaining === 0) {
+        setIsGameOver(true)
+      }
+    }, shouldReduceMotion ? 0 : INCORRECT_GUESS_ANIMATION_MS)
   }
 
   function resetPuzzle() {
@@ -238,15 +311,14 @@ function App() {
       return
     }
 
-    updateLayout(() => {
-      setSelectedIds([])
-      setSolvedCategories([])
-      setBoardCards(buildCards(data.categories))
-      setMistakesRemaining(MAX_MISTAKES)
-      showMessage('Select four words that share a connection.')
-      setIsGameOver(false)
-      setGuessAnimation(null)
-    })
+    setSelectedIds([])
+    setSolvedCategories([])
+    setBoardCards(buildCards(data.categories))
+    setMistakesRemaining(MAX_MISTAKES)
+    setIsGameOver(false)
+    setGuessAnimation(null)
+    setLayoutPhase('idle')
+    setToast(null)
   }
 
   if (error) {
@@ -269,6 +341,27 @@ function App() {
     )
   }
 
+  if (!hasStarted) {
+    return (
+      <motion.main
+        className="app-shell title-screen"
+        initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: shouldReduceMotion ? 0 : 0.24 }}
+      >
+        <img className="title-logo" src={connectionsLogo} alt="" />
+        <h1>Connections</h1>
+        <div className="title-meta" aria-label="Puzzle details">
+          <span>{data.print_date}</span>
+          <span>By {data.editor}</span>
+        </div>
+        <button className="title-start" type="button" onClick={() => setHasStarted(true)}>
+          Play
+        </button>
+      </motion.main>
+    )
+  }
+
   return (
     <main className="app-shell">
       <header className="game-header">
@@ -276,74 +369,137 @@ function App() {
           <img className="app-logo" src={connectionsLogo} alt="" />
           <h1>Connections</h1>
         </div>
-        <div className="puzzle-meta" aria-label="Puzzle details">
-          <span>{data.print_date}</span>
-          <span>Edited by {data.editor}</span>
-        </div>
       </header>
 
       <section className="game-area" aria-label="Connections puzzle">
         <p className="game-instruction">Create four groups of four.</p>
 
-        <div className="solved-list" aria-live="polite">
-          {visibleSolvedCategories.map((categoryIndex) => {
-            const category = data.categories[categoryIndex]
+        <div className="board-frame">
+          <div className="solved-list" aria-live="polite">
+            <AnimatePresence initial={false}>
+              {visibleSolvedCategories.map((categoryIndex) => {
+                const category = data.categories[categoryIndex]
 
-            return (
-              <article
-                className={`solved-group ${categoryColors[categoryIndex]}`}
-                key={category.title}
-              >
-                <h2>{category.title}</h2>
-                <p>{category.cards.map((card) => card.content).join(', ')}</p>
-              </article>
-            )
-          })}
-        </div>
-
-        {!isGameOver && !isWon ? (
-          <div
-            className={`word-grid${guessAnimation ? ` ${guessAnimation}` : ''}`}
-            aria-label="Selectable words"
-          >
-            {unsolvedCards.map((card) => {
-              const isSelected = selectedIds.includes(card.id)
-
-              return (
-                <button
-                  className={`word-card${isSelected ? ' selected' : ''}${poppedCardId === card.id ? ' popped' : ''}`}
-                  key={card.id}
-                  type="button"
-                  style={{ viewTransitionName: getCardTransitionName(card) }}
-                  aria-pressed={isSelected}
-                  onClick={() => toggleCard(card.id)}
-                >
-                  {card.content}
-                </button>
-              )
-            })}
+                return (
+                  <motion.article
+                    layout
+                    className={`solved-group ${categoryColors[categoryIndex]}`}
+                    key={category.title}
+                    initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 10, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.98 }}
+                    transition={layoutTransition}
+                  >
+                    <h2>{category.title}</h2>
+                    <p>{category.cards.map((card) => card.content).join(', ')}</p>
+                  </motion.article>
+                )
+              })}
+            </AnimatePresence>
           </div>
-        ) : null}
 
-        <p className="feedback" key={feedbackKey} role="status" aria-live="polite">
-          {message}
-        </p>
+          <AnimatePresence initial={false}>
+            {!isGameOver && !isWon ? (
+              <motion.div
+                layout
+                className="word-grid"
+                aria-label="Selectable words"
+                transition={layoutTransition}
+              >
+                <AnimatePresence initial={false}>
+                  {unsolvedCards.map((card) => {
+                    const isSelected = selectedIds.includes(card.id)
+                    const isCorrectSelection = guessAnimation === 'correct' && isSelected
+                    const isIncorrectSelection = guessAnimation === 'incorrect' && isSelected
+                    const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
+                    const jumpDelay = shouldReduceMotion
+                      ? 0
+                      : (jumpOrder * INCORRECT_JUMP_STAGGER_MS) / 1000
+
+                    return (
+                      <motion.button
+                        layout
+                        className={`word-card${isSelected ? ' selected' : ''}`}
+                        key={card.id}
+                        type="button"
+                        aria-pressed={isSelected}
+                        onClick={() => toggleCard(card.id)}
+                        initial={{ opacity: 0, scale: 0.96 }}
+                        animate={{
+                          opacity: 1,
+                          scale: isSelected ? 1.03 : 1,
+                          y: isIncorrectSelection && !shouldReduceMotion ? [0, -7, 0] : 0,
+                          x: isIncorrectSelection && !shouldReduceMotion ? [0, -5, 5, -5, 5, 0] : 0,
+                          backgroundColor: isCorrectSelection
+                            ? '#a0c35a'
+                            : isSelected
+                              ? '#5a594e'
+                              : '#efefe6',
+                          color: isCorrectSelection ? '#111111' : isSelected ? '#ffffff' : '#111111',
+                        }}
+                        exit={{ opacity: 0, scale: 0.92 }}
+                        whileTap={shouldReduceMotion ? undefined : { scale: 0.96 }}
+                        transition={{
+                          layout: layoutTransition,
+                          scale: { duration: shouldReduceMotion ? 0 : 0.12 },
+                          y: {
+                            duration: shouldReduceMotion ? 0 : 0.25,
+                            delay: jumpDelay,
+                            ease: 'easeOut',
+                          },
+                          x: {
+                            duration: shouldReduceMotion ? 0 : 0.38,
+                            delay: shouldReduceMotion ? 0 : 1,
+                            ease: 'easeInOut',
+                          },
+                          backgroundColor: { duration: shouldReduceMotion ? 0 : 0.16 },
+                          color: { duration: shouldReduceMotion ? 0 : 0.16 },
+                        }}
+                      >
+                        {card.content}
+                      </motion.button>
+                    )
+                  })}
+                </AnimatePresence>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {toast ? (
+              <motion.div
+                className="board-popup"
+                key={toast.id}
+                role="status"
+                aria-live="polite"
+                initial={{ opacity: 0, scale: shouldReduceMotion ? 1 : 0.88 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: shouldReduceMotion ? 1 : 0.96 }}
+                transition={{ duration: shouldReduceMotion ? 0 : 0.18, ease: 'easeOut' }}
+              >
+                {toast.text}
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+        </div>
 
         <div className="mistakes" aria-label={`${mistakesRemaining} mistakes remaining`}>
           <span>Mistakes remaining:</span>
           {Array.from({ length: MAX_MISTAKES }).map((_, index) => (
-            <span
+            <motion.span
               className={`mistake-dot${index < mistakesRemaining ? '' : ' spent'}`}
               key={index}
+              animate={{ scale: index < mistakesRemaining ? 1 : 0.74 }}
+              transition={{ duration: shouldReduceMotion ? 0 : 0.18 }}
             />
           ))}
         </div>
 
         <div className="actions">
-          <button type="button" onClick={shuffleBoard} disabled={isGameOver || isWon}>
+          <button type="button" onClick={shuffleBoard} disabled={isGameOver || isWon || !!guessAnimation}>
             Shuffle
           </button>
-          <button type="button" onClick={deselectAll} disabled={selectedIds.length === 0}>
+          <button type="button" onClick={deselectAll} disabled={selectedIds.length === 0 || !!guessAnimation}>
             Deselect all
           </button>
           <button className="primary-action" type="button" onClick={submitSelection} disabled={!canSubmit}>
