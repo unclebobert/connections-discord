@@ -204,7 +204,7 @@
   background: #efefe6;
   color: #111;
   font: inherit;
-  font-size: clamp(10px, min(1.8vw, 2.5svh), 18px);
+  font-size: clamp(10px, 2.8vw, 18px);
   font-weight: 800;
   line-height: 1.15;
   letter-spacing: 0;
@@ -335,12 +335,6 @@
 
   .board-frame {
     --board-gap: 6px;
-  }
-
-  .word-card,
-  .solved-group {
-    height: var(--tile-height);
-    border-radius: 6px;
   }
 
   .word-card {
