@@ -1,4 +1,6 @@
 import { Hono } from 'hono'
+import { cors } from 'hono/cors';
+
 import { KVNamespace } from '@cloudflare/workers-types';
 
 type Bindings = {
@@ -9,10 +11,10 @@ type Bindings = {
 
 // NOTE: endpoints should never include /api since all requests starting with
 // /api/* will be routed to this server and the prefix gets removed
-// i.e. the client should always prepend /api before making requests to the server,
-// but the server should not include /api in its routes
-// const baseUrl = process.env.DEV === 'production' ? '/api' : '';
+// i.e. the client should prepend /api before making requests to the server *if in prod*,
+// but *in dev* it should make requests directly to the server without the /api prefix
 const app = new Hono<{ Bindings: Bindings }>()
+app.use('*', cors())
 
 app.get('/', (c) => c.text('Connections Discord Bot Server'))
 

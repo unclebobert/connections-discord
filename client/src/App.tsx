@@ -2,28 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import connectionsLogo from './assets/connections.svg'
 import './App.css'
 
-interface GameCategory {
-  title: string;
-  cards: Array<{
-    content: string;
-    position: number;
-  }>
-}
+import { type GameCategory, type PlayCard, type GameData, API_BASE_URL } from './lib'
 
-interface GameData {
-  status: string;
-  id: number;
-  print_date: string;
-  editor: string;
-  categories: GameCategory[];
-}
-
-interface PlayCard {
-  id: string;
-  content: string;
-  position: number;
-  categoryIndex: number;
-}
 
 const MAX_MISTAKES = 4
 
@@ -81,7 +61,7 @@ function App() {
     const today = new Date()
     const dateFormatted = formatPuzzleDate(today)
 
-    fetch(`/api/connections/${dateFormatted}`)
+    fetch(`${API_BASE_URL}/connections/${dateFormatted}`)
       .then((response) => {
         if (!response.ok) {
           throw new Error('Unable to load today\'s puzzle.')
