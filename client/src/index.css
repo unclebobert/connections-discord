@@ -26,15 +26,17 @@
 
 body {
   min-width: 320px;
-  height: 100svh;
+  min-height: 100svh;
   margin: 0;
   background: var(--page-bg);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 html {
-  height: 100svh;
-  overflow: hidden;
+  min-height: 100svh;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 button {
@@ -57,6 +59,6 @@ h1 {
 }
 
 #root {
-  height: 100svh;
-  overflow: hidden;
+  min-height: 100svh;
+  overflow: visible;
 }
