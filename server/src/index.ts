@@ -26,7 +26,7 @@ app.get('/connections/:date', async (c) => {
   }
 
   // Check if puzzle data is cached in KV
-  let data = await c.env.KV.get(`puzzle:${date}`, { type: 'json', cacheTtl: 300 });
+  let data = await c.env.KV.get(`puzzle:${date}`, { type: 'json', cacheTtl: 86400 });
 
   if (!data) {
     const response = await fetch(`https://www.nytimes.com/svc/connections/v2/${date}.json`, {
@@ -50,7 +50,7 @@ app.get('/connections/:date', async (c) => {
   }
 
   return c.json(data, 200, {
-    'Cache-Control': 'public, max-age=300'
+    'Cache-Control': 'public, max-age=86400' // Cache for 1 day
   });
 });
 
