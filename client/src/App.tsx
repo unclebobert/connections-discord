@@ -433,15 +433,18 @@ function App() {
                   return (
                     <motion.div
                       layout
-                      className={`solved-group ${categoryColors[categoryIndex]}`}
+                      className="solved-group-shell"
                       key={category.title}
-                      initial={{ opacity: 0, y: SOLVED_GROUP_ENTER_Y }}
+                      initial={{ opacity: 1, y: SOLVED_GROUP_ENTER_Y }}
                       animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
+                      exit={{ opacity: 1, y: 0 }}
                       transition={layoutTransition}
                     >
-                      <h2>{category.title}</h2>
-                      <p>{category.cards.map((card) => card.content).join(', ')}</p>
+                      {/* Keep layout movement and bounce transforms separate so Motion does not swallow the CSS scale animation. */}
+                      <div className={`solved-group ${categoryColors[categoryIndex]}`}>
+                        <h2>{category.title}</h2>
+                        <p>{category.cards.map((card) => card.content).join(', ')}</p>
+                      </div>
                     </motion.div>
                   )
                 })}
@@ -459,9 +462,7 @@ function App() {
                       const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
                       const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
                       const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
-                      const exitAnimation = layoutPhase === 'instant'
-                        ? { opacity: 0, transition: { duration: 0 } }
-                        : { opacity: 0 }
+                      const exitAnimation = { opacity: 0, transition: { duration: 0 } }
 
                       return (
                         <motion.button
