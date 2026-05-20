@@ -7,11 +7,38 @@ import { type GameCategory, type PlayCard, type GameData, API_BASE_URL } from '.
 
 const MAX_MISTAKES = 4
 const INCORRECT_SHAKE_ANIMATION_MS = 420
-const CORRECT_SWAP_ANIMATION_MS = 520
+const CORRECT_SWAP_ANIMATION_MS = 500
+const SOLVED_GROUP_REVEAL_DELAY_MS = 100
 const TOAST_MS = 1150
 const GUESS_JUMP_ANIMATION_MS = 1000
 const GUESS_JUMP_STAGGER_MS = 120
 const GUESS_JUMP_DURATION_MS = 300
+const INSTANT_LAYOUT_RESET_MS = 40
+const INCORRECT_CLEAR_BUFFER_MS = 80
+
+const DEFAULT_LAYOUT_SECONDS = 0.28
+const DEFAULT_LAYOUT_EASE = [0, 0, 0.2, 1] as const
+const CORRECT_SWAP_LAYOUT_EASE = [0.2, 0.9, 0.5, 1] as const
+const TITLE_ENTER_SECONDS = 0.24
+const CARD_PRESS_SCALE = 0.96
+const SELECTED_CARD_SCALE = 1.03
+const CARD_ENTER_SCALE = 0.96
+const CARD_EXIT_SCALE = 0.92
+const SOLVED_GROUP_ENTER_SCALE = 0.98
+const TOAST_ENTER_SCALE = 0.88
+const TOAST_EXIT_SCALE = 0.96
+const SPENT_MISTAKE_SCALE = 0.74
+const CARD_JUMP_Y = -16
+const CARD_SHAKE_X = [-7, 7, -6, 5]
+const CARD_COLOR_ANIMATION_SECONDS = 0.16
+const CARD_SCALE_ANIMATION_SECONDS = 0.12
+const TOAST_ANIMATION_SECONDS = 0.18
+const SOLVED_GROUP_ENTER_Y = 10
+const TITLE_ENTER_Y = 10
+const CARD_DEFAULT_BACKGROUND = '#efefe6'
+const CARD_SELECTED_BACKGROUND = '#5a594e'
+const CARD_DEFAULT_TEXT = '#111111'
+const CARD_SELECTED_TEXT = '#ffffff'
 
 const categoryColors = [
   'category-yellow',
@@ -73,6 +100,9 @@ function getCardId(categoryIndex: number, card: GameCategory['cards'][number]) {
   return `${categoryIndex}-${card.position}-${card.content}`
 }
 
+// Connections reveals a solved group only after its cards gather into the next
+// open row. We create that effect by swapping selected cards into the first four
+// unsolved slots while preserving the category's answer order.
 function swapCategoryCardsToTopRow(
   cards: PlayCard[],
   category: GameCategory,
@@ -115,18 +145,21 @@ function App() {
   const [guessAnimation, setGuessAnimation] = useState<'correct' | 'incorrect' | null>(null)
   const [guessPhase, setGuessPhase] = useState<'idle' | 'jump' | 'shake' | 'swap'>('idle')
   const [layoutPhase, setLayoutPhase] = useState<'idle' | 'swap' | 'instant'>('idle')
+  const [activeGuessIds, setActiveGuessIds] = useState<string[]>([])
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null)
   const animationTimers = useRef<number[]>([])
   const toastTimer = useRef<number | null>(null)
 
+  // Motion layout transitions are normally gentle, but we temporarily speed or
+  // disable them during the correct-guess swap/reveal sequence.
   const layoutDuration = layoutPhase === 'instant'
     ? 0
     : layoutPhase === 'swap'
       ? CORRECT_SWAP_ANIMATION_MS / 1000
-      : 0.28
+      : DEFAULT_LAYOUT_SECONDS
   const layoutTransition = {
     duration: layoutDuration,
-    ease: 'easeOut' as const,
+    ease: layoutPhase === 'swap' ? CORRECT_SWAP_LAYOUT_EASE : DEFAULT_LAYOUT_EASE,
   }
 
   useEffect(() => {
@@ -184,6 +217,8 @@ function App() {
   const unsolvedCards = boardCards.filter(
     (card) => !visibleSolvedCategories.includes(card.categoryIndex),
   )
+
+  // The selected cards jump in their current board order, not in click order.
   const selectedJumpOrder = useMemo(() => {
     const selectedSet = new Set(selectedIds)
     const jumpOrder = new Map<string, number>()
@@ -255,6 +290,7 @@ function App() {
     if (isCorrect) {
       const nextSolvedCategories = [...solvedCategories, categoryIndex]
       const hasWon = nextSolvedCategories.length === data.categories.length
+      setActiveGuessIds(selectedIds)
       setGuessAnimation('correct')
       setGuessPhase('jump')
 
@@ -274,16 +310,21 @@ function App() {
           ),
         )
 
+        // Once the selected cards have swapped into the top row, hold briefly
+        // before revealing the solved category without a second reflow slide.
         queueAnimation(() => {
-          setLayoutPhase('instant')
-          setSolvedCategories(nextSolvedCategories)
-          setSelectedIds([])
-          setGuessAnimation(null)
-          setGuessPhase('idle')
-
           queueAnimation(() => {
-            setLayoutPhase('idle')
-          }, 40)
+            setLayoutPhase('instant')
+            setSolvedCategories(nextSolvedCategories)
+            setSelectedIds([])
+            setActiveGuessIds([])
+            setGuessAnimation(null)
+            setGuessPhase('idle')
+
+            queueAnimation(() => {
+              setLayoutPhase('idle')
+            }, INSTANT_LAYOUT_RESET_MS)
+          }, SOLVED_GROUP_REVEAL_DELAY_MS)
         }, CORRECT_SWAP_ANIMATION_MS)
       }, GUESS_JUMP_ANIMATION_MS)
 
@@ -298,6 +339,7 @@ function App() {
     const nextMistakesRemaining = mistakesRemaining - 1
 
     setMistakesRemaining(nextMistakesRemaining)
+    setActiveGuessIds(selectedIds)
     setGuessAnimation('incorrect')
     setGuessPhase('jump')
 
@@ -305,19 +347,23 @@ function App() {
       showToast('One away...')
     }
 
+    // Incorrect guesses jump first, then only the picked cards shake. Keeping
+    // these as separate phases prevents interrupted x/y animations from leaving
+    // cards visually offset.
     queueAnimation(() => {
       setGuessPhase('shake')
     }, GUESS_JUMP_ANIMATION_MS)
 
     queueAnimation(() => {
       setSelectedIds([])
+      setActiveGuessIds([])
       setGuessAnimation(null)
       setGuessPhase('idle')
 
       if (nextMistakesRemaining === 0) {
         setIsGameOver(true)
       }
-    }, GUESS_JUMP_ANIMATION_MS + INCORRECT_SHAKE_ANIMATION_MS + 80)
+    }, GUESS_JUMP_ANIMATION_MS + INCORRECT_SHAKE_ANIMATION_MS + INCORRECT_CLEAR_BUFFER_MS)
   }
 
   function resetPuzzle() {
@@ -333,6 +379,7 @@ function App() {
     setGuessAnimation(null)
     setGuessPhase('idle')
     setLayoutPhase('idle')
+    setActiveGuessIds([])
     setToast(null)
   }
 
@@ -360,9 +407,9 @@ function App() {
     return (
       <motion.main
         className="app-shell title-screen"
-        initial={{ opacity: 0, y: 10 }}
+        initial={{ opacity: 0, y: TITLE_ENTER_Y }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.24 }}
+        transition={{ duration: TITLE_ENTER_SECONDS }}
       >
         <img className="title-logo" src={connectionsLogo} alt="" />
         <h1>Connections</h1>
@@ -400,9 +447,9 @@ function App() {
                     layout
                     className={`solved-group ${categoryColors[categoryIndex]}`}
                     key={category.title}
-                    initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                    initial={{ opacity: 0, y: SOLVED_GROUP_ENTER_Y, scale: SOLVED_GROUP_ENTER_SCALE }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.98 }}
+                    exit={{ opacity: 0, scale: SOLVED_GROUP_ENTER_SCALE }}
                     transition={layoutTransition}
                   >
                     <h2>{category.title}</h2>
@@ -421,14 +468,16 @@ function App() {
                 aria-label="Selectable words"
                 transition={layoutTransition}
               >
-                <AnimatePresence initial={false}>
+                <AnimatePresence initial={false} mode="popLayout">
                   {unsolvedCards.map((card) => {
-                    const isSelected = selectedIds.includes(card.id)
-                    const isCorrectSelection = guessAnimation === 'correct' && isSelected
+                    const isSelected = selectedIds.includes(card.id) || activeGuessIds.includes(card.id)
                     const isJumpingSelection = guessPhase === 'jump' && isSelected
                     const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
                     const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
                     const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
+                    const exitAnimation = layoutPhase === 'instant'
+                      ? { opacity: 0, scale: 1, transition: { duration: 0 } }
+                      : { opacity: 0, scale: CARD_EXIT_SCALE }
 
                     return (
                       <motion.button
@@ -438,24 +487,20 @@ function App() {
                         type="button"
                         aria-pressed={isSelected}
                         onClick={() => toggleCard(card.id)}
-                        initial={{ opacity: 0, scale: 0.96 }}
+                        initial={{ opacity: 0, scale: CARD_ENTER_SCALE }}
                         animate={{
                           opacity: 1,
-                          scale: isSelected ? 1.03 : 1,
-                          y: isJumpingSelection ? [0, -16, 0] : 0,
-                          x: isShakingSelection ? [0, -7, 7, -6, 5, 0] : 0,
-                          backgroundColor: isCorrectSelection
-                            ? '#a0c35a'
-                            : isSelected
-                              ? '#5a594e'
-                              : '#efefe6',
-                          color: isCorrectSelection ? '#111111' : isSelected ? '#ffffff' : '#111111',
+                          scale: isSelected ? SELECTED_CARD_SCALE : 1,
+                          y: isJumpingSelection ? [0, CARD_JUMP_Y, 0] : 0,
+                          x: isShakingSelection ? [0, ...CARD_SHAKE_X, 0] : 0,
+                          backgroundColor: isSelected ? CARD_SELECTED_BACKGROUND : CARD_DEFAULT_BACKGROUND,
+                          color: isSelected ? CARD_SELECTED_TEXT : CARD_DEFAULT_TEXT,
                         }}
-                        exit={{ opacity: 0, scale: 0.92 }}
-                        whileTap={{ scale: 0.96 }}
+                        exit={exitAnimation}
+                        whileTap={{ scale: CARD_PRESS_SCALE }}
                         transition={{
                           layout: layoutTransition,
-                          scale: { duration: 0.12 },
+                          scale: { duration: CARD_SCALE_ANIMATION_SECONDS },
                           y: {
                             duration: GUESS_JUMP_DURATION_MS / 1000,
                             delay: jumpDelay,
@@ -465,8 +510,8 @@ function App() {
                             duration: INCORRECT_SHAKE_ANIMATION_MS / 1000,
                             ease: 'easeInOut',
                           },
-                          backgroundColor: { duration: 0.16 },
-                          color: { duration: 0.16 },
+                          backgroundColor: { duration: CARD_COLOR_ANIMATION_SECONDS },
+                          color: { duration: CARD_COLOR_ANIMATION_SECONDS },
                         }}
                       >
                         {card.content}
@@ -485,10 +530,10 @@ function App() {
                 key={toast.id}
                 role="status"
                 aria-live="polite"
-                initial={{ opacity: 0, scale: 0.88 }}
+                initial={{ opacity: 0, scale: TOAST_ENTER_SCALE }}
                 animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.96 }}
-                transition={{ duration: 0.18, ease: 'easeOut' }}
+                exit={{ opacity: 0, scale: TOAST_EXIT_SCALE }}
+                transition={{ duration: TOAST_ANIMATION_SECONDS, ease: 'easeOut' }}
               >
                 {toast.text}
               </motion.div>
@@ -502,8 +547,8 @@ function App() {
             <motion.span
               className={`mistake-dot${index < mistakesRemaining ? '' : ' spent'}`}
               key={index}
-              animate={{ scale: index < mistakesRemaining ? 1 : 0.74 }}
-              transition={{ duration: 0.18 }}
+              animate={{ scale: index < mistakesRemaining ? 1 : SPENT_MISTAKE_SCALE }}
+              transition={{ duration: TOAST_ANIMATION_SECONDS }}
             />
           ))}
         </div>
