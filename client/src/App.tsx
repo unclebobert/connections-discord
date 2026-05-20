@@ -81,7 +81,7 @@ function App() {
     const today = new Date()
     const dateFormatted = formatPuzzleDate(today)
 
-    fetch(`https://www.nytimes.com/svc/connections/v2/${dateFormatted}.json`)
+    fetch(`/api/connections/${dateFormatted}`)
       .then((response) => {
         if (!response.ok) {
           throw new Error('Unable to load today\'s puzzle.')

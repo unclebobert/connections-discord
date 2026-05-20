@@ -17,19 +17,19 @@
       "persist": true,
       "head_sampling_rate": 1
     }
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "edc39aa249e14ed9af53b3c0f299748d"
+    }
+  ]
   // "compatibility_flags": [
   //   "nodejs_compat"
   // ],
   // "vars": {
   //   "MY_VAR": "my-variable"
   // },
-  // "kv_namespaces": [
-  //   {
-  //     "binding": "MY_KV_NAMESPACE",
-  //     "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  //   }
-  // ],
   // "r2_buckets": [
   //   {
   //     "binding": "MY_BUCKET",
