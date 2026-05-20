@@ -1,8 +1,6 @@
 .app-shell {
-  --tile-height: clamp(32px, 9svh, 80px);
-
   width: min(100%, 720px);
-  min-height: 100svh;
+  height: 100svh;
   margin: 0 auto;
   padding: clamp(10px, 3svh, 28px) 18px clamp(10px, 3.8svh, 36px);
   box-sizing: border-box;
@@ -104,22 +102,36 @@
 }
 
 .board-frame {
+  --board-gap: clamp(5px, 1.1svh, 8px);
+  --board-max-height: calc(320px + (var(--board-gap) * 3));
+
   position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: clamp(5px, 1.1svh, 8px);
+  flex: 1 1 min(100%, var(--board-max-height));
   width: min(100%, 640px);
-  min-height: 0;
+  min-height: 160px;
+  max-height: var(--board-max-height);
+}
+
+.board-grid {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: repeat(4, minmax(24px, 80px));
+  grid-auto-rows: minmax(24px, 80px);
+  gap: var(--board-gap);
+  position: relative;
 }
 
 .solved-group-shell,
 .solved-group {
   width: 100%;
-  height: var(--tile-height);
+  height: 100%;
   opacity: 1;
 }
 
 .solved-group-shell {
+  grid-column: 1 / -1;
   position: relative;
   z-index: 2;
 }
@@ -182,17 +194,10 @@
   background: #ba81c5;
 }
 
-.word-grid {
-  width: 100%;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: clamp(5px, 1.1svh, 8px);
-  position: relative;
-  z-index: 1;
-}
-
 .word-card {
-  height: var(--tile-height);
+  max-height: 80px;
+  min-height: 0;
+  height: 100%;
   padding: clamp(4px, 1svh, 8px);
   border: 0;
   border-radius: 8px;
@@ -328,8 +333,8 @@
     height: 36px;
   }
 
-  .word-grid {
-    gap: 6px;
+  .board-frame {
+    --board-gap: 6px;
   }
 
   .word-card,

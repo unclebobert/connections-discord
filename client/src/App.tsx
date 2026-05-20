@@ -426,7 +426,12 @@ function App() {
         <div className="board-frame">
           <AnimatePresence initial={false}>
             {!isGameOver && !isWon ? (
-              <>
+              <motion.div
+                layout
+                className="board-grid"
+                aria-label="Selectable words"
+                transition={layoutTransition}
+              >
                 {visibleSolvedCategories.map((categoryIndex) => {
                   const category = data.categories[categoryIndex]
 
@@ -448,57 +453,50 @@ function App() {
                     </motion.div>
                   )
                 })}
-                <motion.div
-                  layout
-                  className="word-grid"
-                  aria-label="Selectable words"
-                  transition={layoutTransition}
-                >
-                  <AnimatePresence initial={false} mode="popLayout">
-                    {unsolvedCards.map((card) => {
-                      const isSubmittedCard = activeGuessIds.includes(card.id)
-                      const isSelected = selectedIds.includes(card.id) || isSubmittedCard
-                      const isJumpingSelection = guessPhase === 'jump' && isSelected
-                      const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
-                      const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
-                      const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
-                      const exitAnimation = { opacity: 0, transition: { duration: 0 } }
+                <AnimatePresence initial={false} mode="popLayout">
+                  {unsolvedCards.map((card) => {
+                    const isSubmittedCard = activeGuessIds.includes(card.id)
+                    const isSelected = selectedIds.includes(card.id) || isSubmittedCard
+                    const isJumpingSelection = guessPhase === 'jump' && isSelected
+                    const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
+                    const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
+                    const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
+                    const exitAnimation = { opacity: 0, transition: { duration: 0 } }
 
-                      return (
-                        <motion.button
-                          layout="position"
-                          className={`word-card${isSelected ? ' selected' : ''}${isSubmittedCard ? ' submitted' : ''}`}
-                          key={card.id}
-                          type="button"
-                          aria-pressed={isSelected}
-                          onClick={() => toggleCard(card.id)}
-                          initial={{ opacity: 0 }}
-                          animate={{
-                            opacity: 1,
-                            y: isJumpingSelection ? [0, CARD_JUMP_Y, 0] : 0,
-                            x: isShakingSelection ? [0, ...CARD_SHAKE_X, 0] : 0,
-                          }}
-                          exit={exitAnimation}
-                          transition={{
-                            layout: layoutTransition,
-                            y: {
-                              duration: GUESS_JUMP_DURATION_MS / 1000,
-                              delay: jumpDelay,
-                              ease: 'easeOut',
-                            },
-                            x: {
-                              duration: INCORRECT_SHAKE_ANIMATION_MS / 1000,
-                              ease: 'easeInOut',
-                            },
-                          }}
-                        >
-                          {card.content}
-                        </motion.button>
-                      )
-                    })}
-                  </AnimatePresence>
-                </motion.div>
-              </>
+                    return (
+                      <motion.button
+                        layout="position"
+                        className={`word-card${isSelected ? ' selected' : ''}${isSubmittedCard ? ' submitted' : ''}`}
+                        key={card.id}
+                        type="button"
+                        aria-pressed={isSelected}
+                        onClick={() => toggleCard(card.id)}
+                        initial={{ opacity: 0 }}
+                        animate={{
+                          opacity: 1,
+                          y: isJumpingSelection ? [0, CARD_JUMP_Y, 0] : 0,
+                          x: isShakingSelection ? [0, ...CARD_SHAKE_X, 0] : 0,
+                        }}
+                        exit={exitAnimation}
+                        transition={{
+                          layout: layoutTransition,
+                          y: {
+                            duration: GUESS_JUMP_DURATION_MS / 1000,
+                            delay: jumpDelay,
+                            ease: 'easeOut',
+                          },
+                          x: {
+                            duration: INCORRECT_SHAKE_ANIMATION_MS / 1000,
+                            ease: 'easeInOut',
+                          },
+                        }}
+                      >
+                        {card.content}
+                      </motion.button>
+                    )
+                  })}
+                </AnimatePresence>
+              </motion.div>
             ) : null}
           </AnimatePresence>
 
