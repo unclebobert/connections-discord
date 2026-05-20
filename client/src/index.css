@@ -10,7 +10,7 @@
   --sans: "Libre Franklin", Arial, Helvetica, sans-serif;
   --title: "Old Standard TT", Georgia, serif;
 
-  font: 16px/1.45 var(--sans);
+  font: clamp(13px, 2.2svh, 16px)/1.45 var(--sans);
   letter-spacing: 0;
   color: var(--body-text);
   background: var(--page-bg);
@@ -26,9 +26,15 @@
 
 body {
   min-width: 320px;
-  min-height: 100svh;
+  height: 100svh;
   margin: 0;
   background: var(--page-bg);
+  overflow: hidden;
+}
+
+html {
+  height: 100svh;
+  overflow: hidden;
 }
 
 button {
@@ -44,12 +50,13 @@ p {
 h1 {
   font-family: var(--title);
   color: var(--heading-text);
-  font-size: 32px;
+  font-size: clamp(24px, 5svh, 32px);
   line-height: 1.1;
   font-weight: 700;
   letter-spacing: 0;
 }
 
 #root {
-  min-height: 100svh;
+  height: 100svh;
+  overflow: hidden;
 }

@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
+import { AnimatePresence, motion } from 'motion/react'
 import connectionsLogo from './assets/connections.svg'
 import './App.css'
 
 import { type GameCategory, type PlayCard, type GameData, API_BASE_URL } from './lib'
 
 const MAX_MISTAKES = 4
-const INCORRECT_GUESS_ANIMATION_MS = 1200
+const INCORRECT_SHAKE_ANIMATION_MS = 420
 const CORRECT_SWAP_ANIMATION_MS = 520
 const TOAST_MS = 1150
-const INCORRECT_JUMP_STAGGER_MS = 100
+const GUESS_JUMP_ANIMATION_MS = 1000
+const GUESS_JUMP_STAGGER_MS = 120
+const GUESS_JUMP_DURATION_MS = 300
 
 const categoryColors = [
   'category-yellow',
@@ -102,7 +104,6 @@ function swapCategoryCardsToTopRow(
 }
 
 function App() {
-  const shouldReduceMotion = useReducedMotion()
   const [data, setData] = useState<GameData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [hasStarted, setHasStarted] = useState(false)
@@ -112,12 +113,13 @@ function App() {
   const [mistakesRemaining, setMistakesRemaining] = useState(MAX_MISTAKES)
   const [isGameOver, setIsGameOver] = useState(false)
   const [guessAnimation, setGuessAnimation] = useState<'correct' | 'incorrect' | null>(null)
+  const [guessPhase, setGuessPhase] = useState<'idle' | 'jump' | 'shake' | 'swap'>('idle')
   const [layoutPhase, setLayoutPhase] = useState<'idle' | 'swap' | 'instant'>('idle')
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null)
   const animationTimers = useRef<number[]>([])
   const toastTimer = useRef<number | null>(null)
 
-  const layoutDuration = shouldReduceMotion || layoutPhase === 'instant'
+  const layoutDuration = layoutPhase === 'instant'
     ? 0
     : layoutPhase === 'swap'
       ? CORRECT_SWAP_ANIMATION_MS / 1000
@@ -254,30 +256,36 @@ function App() {
       const nextSolvedCategories = [...solvedCategories, categoryIndex]
       const hasWon = nextSolvedCategories.length === data.categories.length
       setGuessAnimation('correct')
-      setLayoutPhase('swap')
-      setBoardCards((currentCards) =>
-        swapCategoryCardsToTopRow(
-          currentCards,
-          data.categories[categoryIndex],
-          categoryIndex,
-          solvedCategories,
-        ),
-      )
+      setGuessPhase('jump')
 
       if (hasWon) {
         showToast(getVictoryMessage(MAX_MISTAKES - mistakesRemaining))
       }
 
       queueAnimation(() => {
-        setLayoutPhase('instant')
-        setSolvedCategories(nextSolvedCategories)
-        setSelectedIds([])
-        setGuessAnimation(null)
+        setGuessPhase('swap')
+        setLayoutPhase('swap')
+        setBoardCards((currentCards) =>
+          swapCategoryCardsToTopRow(
+            currentCards,
+            data.categories[categoryIndex],
+            categoryIndex,
+            solvedCategories,
+          ),
+        )
 
         queueAnimation(() => {
-          setLayoutPhase('idle')
-        }, 40)
-      }, shouldReduceMotion ? 0 : CORRECT_SWAP_ANIMATION_MS)
+          setLayoutPhase('instant')
+          setSolvedCategories(nextSolvedCategories)
+          setSelectedIds([])
+          setGuessAnimation(null)
+          setGuessPhase('idle')
+
+          queueAnimation(() => {
+            setLayoutPhase('idle')
+          }, 40)
+        }, CORRECT_SWAP_ANIMATION_MS)
+      }, GUESS_JUMP_ANIMATION_MS)
 
       return
     }
@@ -291,19 +299,25 @@ function App() {
 
     setMistakesRemaining(nextMistakesRemaining)
     setGuessAnimation('incorrect')
+    setGuessPhase('jump')
 
     if (wasOneAway) {
       showToast('One away...')
     }
 
     queueAnimation(() => {
+      setGuessPhase('shake')
+    }, GUESS_JUMP_ANIMATION_MS)
+
+    queueAnimation(() => {
       setSelectedIds([])
       setGuessAnimation(null)
+      setGuessPhase('idle')
 
       if (nextMistakesRemaining === 0) {
         setIsGameOver(true)
       }
-    }, shouldReduceMotion ? 0 : INCORRECT_GUESS_ANIMATION_MS)
+    }, GUESS_JUMP_ANIMATION_MS + INCORRECT_SHAKE_ANIMATION_MS + 80)
   }
 
   function resetPuzzle() {
@@ -317,6 +331,7 @@ function App() {
     setMistakesRemaining(MAX_MISTAKES)
     setIsGameOver(false)
     setGuessAnimation(null)
+    setGuessPhase('idle')
     setLayoutPhase('idle')
     setToast(null)
   }
@@ -345,9 +360,9 @@ function App() {
     return (
       <motion.main
         className="app-shell title-screen"
-        initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 10 }}
+        initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: shouldReduceMotion ? 0 : 0.24 }}
+        transition={{ duration: 0.24 }}
       >
         <img className="title-logo" src={connectionsLogo} alt="" />
         <h1>Connections</h1>
@@ -385,7 +400,7 @@ function App() {
                     layout
                     className={`solved-group ${categoryColors[categoryIndex]}`}
                     key={category.title}
-                    initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 10, scale: 0.98 }}
+                    initial={{ opacity: 0, y: 10, scale: 0.98 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.98 }}
                     transition={layoutTransition}
@@ -410,11 +425,10 @@ function App() {
                   {unsolvedCards.map((card) => {
                     const isSelected = selectedIds.includes(card.id)
                     const isCorrectSelection = guessAnimation === 'correct' && isSelected
-                    const isIncorrectSelection = guessAnimation === 'incorrect' && isSelected
+                    const isJumpingSelection = guessPhase === 'jump' && isSelected
+                    const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
                     const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
-                    const jumpDelay = shouldReduceMotion
-                      ? 0
-                      : (jumpOrder * INCORRECT_JUMP_STAGGER_MS) / 1000
+                    const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
 
                     return (
                       <motion.button
@@ -428,8 +442,8 @@ function App() {
                         animate={{
                           opacity: 1,
                           scale: isSelected ? 1.03 : 1,
-                          y: isIncorrectSelection && !shouldReduceMotion ? [0, -7, 0] : 0,
-                          x: isIncorrectSelection && !shouldReduceMotion ? [0, -5, 5, -5, 5, 0] : 0,
+                          y: isJumpingSelection ? [0, -16, 0] : 0,
+                          x: isShakingSelection ? [0, -7, 7, -6, 5, 0] : 0,
                           backgroundColor: isCorrectSelection
                             ? '#a0c35a'
                             : isSelected
@@ -438,22 +452,21 @@ function App() {
                           color: isCorrectSelection ? '#111111' : isSelected ? '#ffffff' : '#111111',
                         }}
                         exit={{ opacity: 0, scale: 0.92 }}
-                        whileTap={shouldReduceMotion ? undefined : { scale: 0.96 }}
+                        whileTap={{ scale: 0.96 }}
                         transition={{
                           layout: layoutTransition,
-                          scale: { duration: shouldReduceMotion ? 0 : 0.12 },
+                          scale: { duration: 0.12 },
                           y: {
-                            duration: shouldReduceMotion ? 0 : 0.25,
+                            duration: GUESS_JUMP_DURATION_MS / 1000,
                             delay: jumpDelay,
                             ease: 'easeOut',
                           },
                           x: {
-                            duration: shouldReduceMotion ? 0 : 0.38,
-                            delay: shouldReduceMotion ? 0 : 1,
+                            duration: INCORRECT_SHAKE_ANIMATION_MS / 1000,
                             ease: 'easeInOut',
                           },
-                          backgroundColor: { duration: shouldReduceMotion ? 0 : 0.16 },
-                          color: { duration: shouldReduceMotion ? 0 : 0.16 },
+                          backgroundColor: { duration: 0.16 },
+                          color: { duration: 0.16 },
                         }}
                       >
                         {card.content}
@@ -472,10 +485,10 @@ function App() {
                 key={toast.id}
                 role="status"
                 aria-live="polite"
-                initial={{ opacity: 0, scale: shouldReduceMotion ? 1 : 0.88 }}
+                initial={{ opacity: 0, scale: 0.88 }}
                 animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: shouldReduceMotion ? 1 : 0.96 }}
-                transition={{ duration: shouldReduceMotion ? 0 : 0.18, ease: 'easeOut' }}
+                exit={{ opacity: 0, scale: 0.96 }}
+                transition={{ duration: 0.18, ease: 'easeOut' }}
               >
                 {toast.text}
               </motion.div>
@@ -490,7 +503,7 @@ function App() {
               className={`mistake-dot${index < mistakesRemaining ? '' : ' spent'}`}
               key={index}
               animate={{ scale: index < mistakesRemaining ? 1 : 0.74 }}
-              transition={{ duration: shouldReduceMotion ? 0 : 0.18 }}
+              transition={{ duration: 0.18 }}
             />
           ))}
         </div>
