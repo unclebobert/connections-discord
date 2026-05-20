@@ -103,19 +103,16 @@
 
 .board-frame {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(5px, 1.1svh, 8px);
   width: 100%;
   min-height: 0;
 }
 
-.solved-list {
-  width: 100%;
-  display: grid;
-  gap: clamp(5px, 1.1svh, 8px);
-  margin-bottom: clamp(5px, 1.1svh, 8px);
-}
-
 .solved-group {
-  min-height: clamp(42px, 9.4svh, 84px);
+  width: 100%;
+  height: 80px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -165,7 +162,7 @@
 }
 
 .word-card {
-  min-height: clamp(42px, 9.4svh, 84px);
+  height: 80px;
   padding: clamp(4px, 1svh, 8px);
   border: 0;
   border-radius: 8px;
@@ -179,6 +176,9 @@
   text-transform: uppercase;
   cursor: pointer;
   overflow-wrap: anywhere;
+  transition:
+    background-color 250ms ease,
+    color 250ms ease;
 }
 
 .word-card:hover:not(:disabled) {
@@ -192,7 +192,10 @@
   outline-offset: 3px;
 }
 
-.word-card.selected {
+.word-card.selected,
+.word-card.submitted,
+.word-card.selected:hover:not(:disabled),
+.word-card.submitted:hover:not(:disabled) {
   background: #5a594e;
   color: #fff;
 }
@@ -301,7 +304,7 @@
 
   .word-card,
   .solved-group {
-    min-height: 68px;
+    height: 80px;
     border-radius: 6px;
   }
 

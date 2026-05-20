@@ -20,25 +20,11 @@ const DEFAULT_LAYOUT_SECONDS = 0.28
 const DEFAULT_LAYOUT_EASE = [0, 0, 0.2, 1] as const
 const CORRECT_SWAP_LAYOUT_EASE = [0.2, 0.9, 0.5, 1] as const
 const TITLE_ENTER_SECONDS = 0.24
-const CARD_PRESS_SCALE = 0.96
-const SELECTED_CARD_SCALE = 1.03
-const CARD_ENTER_SCALE = 0.96
-const CARD_EXIT_SCALE = 0.92
-const SOLVED_GROUP_ENTER_SCALE = 0.98
-const TOAST_ENTER_SCALE = 0.88
-const TOAST_EXIT_SCALE = 0.96
-const SPENT_MISTAKE_SCALE = 0.74
 const CARD_JUMP_Y = -16
 const CARD_SHAKE_X = [-7, 7, -6, 5]
-const CARD_COLOR_ANIMATION_SECONDS = 0.16
-const CARD_SCALE_ANIMATION_SECONDS = 0.12
 const TOAST_ANIMATION_SECONDS = 0.18
 const SOLVED_GROUP_ENTER_Y = 10
 const TITLE_ENTER_Y = 10
-const CARD_DEFAULT_BACKGROUND = '#efefe6'
-const CARD_SELECTED_BACKGROUND = '#5a594e'
-const CARD_DEFAULT_TEXT = '#111111'
-const CARD_SELECTED_TEXT = '#ffffff'
 
 const categoryColors = [
   'category-yellow',
@@ -284,13 +270,14 @@ function App() {
       return
     }
 
+    const submittedIds = selectedCards.map((card) => card.id)
     const categoryIndex = selectedCards[0].categoryIndex
     const isCorrect = selectedCards.every((card) => card.categoryIndex === categoryIndex)
 
     if (isCorrect) {
       const nextSolvedCategories = [...solvedCategories, categoryIndex]
       const hasWon = nextSolvedCategories.length === data.categories.length
-      setActiveGuessIds(selectedIds)
+      setActiveGuessIds(submittedIds)
       setGuessAnimation('correct')
       setGuessPhase('jump')
 
@@ -339,7 +326,7 @@ function App() {
     const nextMistakesRemaining = mistakesRemaining - 1
 
     setMistakesRemaining(nextMistakesRemaining)
-    setActiveGuessIds(selectedIds)
+    setActiveGuessIds(submittedIds)
     setGuessAnimation('incorrect')
     setGuessPhase('jump')
 
@@ -437,89 +424,80 @@ function App() {
         <p className="game-instruction">Create four groups of four.</p>
 
         <div className="board-frame">
-          <div className="solved-list" aria-live="polite">
-            <AnimatePresence initial={false}>
-              {visibleSolvedCategories.map((categoryIndex) => {
-                const category = data.categories[categoryIndex]
-
-                return (
-                  <motion.article
-                    layout
-                    className={`solved-group ${categoryColors[categoryIndex]}`}
-                    key={category.title}
-                    initial={{ opacity: 0, y: SOLVED_GROUP_ENTER_Y, scale: SOLVED_GROUP_ENTER_SCALE }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, scale: SOLVED_GROUP_ENTER_SCALE }}
-                    transition={layoutTransition}
-                  >
-                    <h2>{category.title}</h2>
-                    <p>{category.cards.map((card) => card.content).join(', ')}</p>
-                  </motion.article>
-                )
-              })}
-            </AnimatePresence>
-          </div>
-
           <AnimatePresence initial={false}>
             {!isGameOver && !isWon ? (
-              <motion.div
-                layout
-                className="word-grid"
-                aria-label="Selectable words"
-                transition={layoutTransition}
-              >
-                <AnimatePresence initial={false} mode="popLayout">
-                  {unsolvedCards.map((card) => {
-                    const isSelected = selectedIds.includes(card.id) || activeGuessIds.includes(card.id)
-                    const isJumpingSelection = guessPhase === 'jump' && isSelected
-                    const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
-                    const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
-                    const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
-                    const exitAnimation = layoutPhase === 'instant'
-                      ? { opacity: 0, scale: 1, transition: { duration: 0 } }
-                      : { opacity: 0, scale: CARD_EXIT_SCALE }
+              <>
+                {visibleSolvedCategories.map((categoryIndex) => {
+                  const category = data.categories[categoryIndex]
 
-                    return (
-                      <motion.button
-                        layout
-                        className={`word-card${isSelected ? ' selected' : ''}`}
-                        key={card.id}
-                        type="button"
-                        aria-pressed={isSelected}
-                        onClick={() => toggleCard(card.id)}
-                        initial={{ opacity: 0, scale: CARD_ENTER_SCALE }}
-                        animate={{
-                          opacity: 1,
-                          scale: isSelected ? SELECTED_CARD_SCALE : 1,
-                          y: isJumpingSelection ? [0, CARD_JUMP_Y, 0] : 0,
-                          x: isShakingSelection ? [0, ...CARD_SHAKE_X, 0] : 0,
-                          backgroundColor: isSelected ? CARD_SELECTED_BACKGROUND : CARD_DEFAULT_BACKGROUND,
-                          color: isSelected ? CARD_SELECTED_TEXT : CARD_DEFAULT_TEXT,
-                        }}
-                        exit={exitAnimation}
-                        whileTap={{ scale: CARD_PRESS_SCALE }}
-                        transition={{
-                          layout: layoutTransition,
-                          scale: { duration: CARD_SCALE_ANIMATION_SECONDS },
-                          y: {
-                            duration: GUESS_JUMP_DURATION_MS / 1000,
-                            delay: jumpDelay,
-                            ease: 'easeOut',
-                          },
-                          x: {
-                            duration: INCORRECT_SHAKE_ANIMATION_MS / 1000,
-                            ease: 'easeInOut',
-                          },
-                          backgroundColor: { duration: CARD_COLOR_ANIMATION_SECONDS },
-                          color: { duration: CARD_COLOR_ANIMATION_SECONDS },
-                        }}
-                      >
-                        {card.content}
-                      </motion.button>
-                    )
-                  })}
-                </AnimatePresence>
-              </motion.div>
+                  return (
+                    <motion.div
+                      layout
+                      className={`solved-group ${categoryColors[categoryIndex]}`}
+                      key={category.title}
+                      initial={{ opacity: 0, y: SOLVED_GROUP_ENTER_Y }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0 }}
+                      transition={layoutTransition}
+                    >
+                      <h2>{category.title}</h2>
+                      <p>{category.cards.map((card) => card.content).join(', ')}</p>
+                    </motion.div>
+                  )
+                })}
+                <motion.div
+                  layout
+                  className="word-grid"
+                  aria-label="Selectable words"
+                  transition={layoutTransition}
+                >
+                  <AnimatePresence initial={false} mode="popLayout">
+                    {unsolvedCards.map((card) => {
+                      const isSubmittedCard = activeGuessIds.includes(card.id)
+                      const isSelected = selectedIds.includes(card.id) || isSubmittedCard
+                      const isJumpingSelection = guessPhase === 'jump' && isSelected
+                      const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
+                      const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
+                      const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
+                      const exitAnimation = layoutPhase === 'instant'
+                        ? { opacity: 0, transition: { duration: 0 } }
+                        : { opacity: 0 }
+
+                      return (
+                        <motion.button
+                          layout="position"
+                          className={`word-card${isSelected ? ' selected' : ''}${isSubmittedCard ? ' submitted' : ''}`}
+                          key={card.id}
+                          type="button"
+                          aria-pressed={isSelected}
+                          onClick={() => toggleCard(card.id)}
+                          initial={{ opacity: 0 }}
+                          animate={{
+                            opacity: 1,
+                            y: isJumpingSelection ? [0, CARD_JUMP_Y, 0] : 0,
+                            x: isShakingSelection ? [0, ...CARD_SHAKE_X, 0] : 0,
+                          }}
+                          exit={exitAnimation}
+                          transition={{
+                            layout: layoutTransition,
+                            y: {
+                              duration: GUESS_JUMP_DURATION_MS / 1000,
+                              delay: jumpDelay,
+                              ease: 'easeOut',
+                            },
+                            x: {
+                              duration: INCORRECT_SHAKE_ANIMATION_MS / 1000,
+                              ease: 'easeInOut',
+                            },
+                          }}
+                        >
+                          {card.content}
+                        </motion.button>
+                      )
+                    })}
+                  </AnimatePresence>
+                </motion.div>
+              </>
             ) : null}
           </AnimatePresence>
 
@@ -530,9 +508,9 @@ function App() {
                 key={toast.id}
                 role="status"
                 aria-live="polite"
-                initial={{ opacity: 0, scale: TOAST_ENTER_SCALE }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: TOAST_EXIT_SCALE }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 transition={{ duration: TOAST_ANIMATION_SECONDS, ease: 'easeOut' }}
               >
                 {toast.text}
@@ -547,7 +525,7 @@ function App() {
             <motion.span
               className={`mistake-dot${index < mistakesRemaining ? '' : ' spent'}`}
               key={index}
-              animate={{ scale: index < mistakesRemaining ? 1 : SPENT_MISTAKE_SCALE }}
+              animate={{ opacity: index < mistakesRemaining ? 1 : 0.45 }}
               transition={{ duration: TOAST_ANIMATION_SECONDS }}
             />
           ))}
