@@ -421,90 +421,85 @@ function App() {
       </header>
 
       <section className="game-area" aria-label="Connections puzzle">
-        <p className="game-instruction">Create four groups of four.</p>
-
+        <p className="game-instruction">Create four groups of four!</p>
         <div className="board-frame">
-          <AnimatePresence initial={false}>
-            {!isGameOver && !isWon ? (
-              <motion.div
-                layout
-                className="board-grid"
-                aria-label="Selectable words"
-                transition={layoutTransition}
-              >
-                {visibleSolvedCategories.map((categoryIndex) => {
-                  const category = data.categories[categoryIndex]
+          <motion.div
+            layout
+            className="board-grid"
+            aria-label="Selectable words"
+            transition={layoutTransition}
+          >
+            {visibleSolvedCategories.map((categoryIndex) => {
+              const category = data.categories[categoryIndex]
 
-                  return (
-                    <motion.div
-                      layout
-                      className="solved-group-shell"
-                      key={category.title}
-                      initial={{ opacity: 1, y: SOLVED_GROUP_ENTER_Y }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 1, y: 0 }}
-                      transition={layoutTransition}
-                    >
-                      {/* Keep layout movement and bounce transforms separate so Motion does not swallow the CSS scale animation. */}
-                      <div className={`solved-group ${categoryColors[categoryIndex]}`}>
-                        <h2>{category.title}</h2>
-                        <p>{category.cards.map((card) => card.content).join(', ')}</p>
-                      </div>
-                    </motion.div>
-                  )
-                })}
-                <AnimatePresence initial={false} mode="popLayout">
-                  {unsolvedCards.map((card) => {
-                    const isSubmittedCard = activeGuessIds.includes(card.id)
-                    const isSelected = selectedIds.includes(card.id) || isSubmittedCard
-                    const isJumpingSelection = guessPhase === 'jump' && isSelected
-                    const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
-                    const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
-                    const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
-                    const exitAnimation = { opacity: 0, transition: { duration: 0 } }
+              return (
+                <motion.div
+                  layout
+                  className="solved-group-shell"
+                  key={category.title}
+                  initial={{ opacity: 1, y: SOLVED_GROUP_ENTER_Y }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 1, y: 0 }}
+                  transition={layoutTransition}
+                >
+                  {/* Keep layout movement and bounce transforms separate so Motion does not swallow the CSS scale animation. */}
+                  <div className={`solved-group ${categoryColors[categoryIndex]}`}>
+                    <h2>{category.title}</h2>
+                    <p>{category.cards.map((card) => card.content).join(', ')}</p>
+                  </div>
+                </motion.div>
+              )
+            })}
+            <AnimatePresence initial={false} mode="popLayout">
+              {unsolvedCards.map((card) => {
+                const isSubmittedCard = activeGuessIds.includes(card.id)
+                const isSelected = selectedIds.includes(card.id) || isSubmittedCard
+                const isJumpingSelection = guessPhase === 'jump' && isSelected
+                const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
+                const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
+                const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
+                const exitAnimation = { opacity: 0, transition: { duration: 0 } }
 
-                    return (
-                      <motion.button
-                        layout="position"
-                        className={`word-card${isSelected ? ' selected' : ''}${isSubmittedCard ? ' submitted' : ''}`}
-                        key={card.id}
-                        type="button"
-                        aria-pressed={isSelected}
-                        onClick={() => toggleCard(card.id)}
-                        initial={{ opacity: 0 }}
-                        animate={{
-                          opacity: 1,
-                          y: isJumpingSelection ? [0, CARD_JUMP_Y, 0] : 0,
-                          x: isShakingSelection ? [0, ...CARD_SHAKE_X, 0] : 0,
-                        }}
-                        exit={exitAnimation}
-                        transition={{
-                          layout: layoutTransition,
-                          y: {
-                            duration: GUESS_JUMP_DURATION_MS / 1000,
-                            delay: jumpDelay,
-                            ease: 'easeOut',
-                          },
-                          x: {
-                            duration: INCORRECT_SHAKE_ANIMATION_MS / 1000,
-                            ease: 'easeInOut',
-                          },
-                        }}
-                      >
-                        {card.content}
-                      </motion.button>
-                    )
-                  })}
-                </AnimatePresence>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
+                return (
+                  <motion.button
+                    layout="position"
+                    className={`word-card${isSelected ? ' selected' : ''}${isSubmittedCard ? ' submitted' : ''}`}
+                    key={card.id}
+                    type="button"
+                    aria-pressed={isSelected}
+                    onClick={() => toggleCard(card.id)}
+                    initial={{ opacity: 0 }}
+                    animate={{
+                      opacity: 1,
+                      y: isJumpingSelection ? [0, CARD_JUMP_Y, 0] : 0,
+                      x: isShakingSelection ? [0, ...CARD_SHAKE_X, 0] : 0,
+                    }}
+                    exit={exitAnimation}
+                    transition={{
+                      layout: layoutTransition,
+                      y: {
+                        duration: GUESS_JUMP_DURATION_MS / 1000,
+                        delay: jumpDelay,
+                        ease: 'easeOut',
+                      },
+                      x: {
+                        duration: INCORRECT_SHAKE_ANIMATION_MS / 1000,
+                        ease: 'easeInOut',
+                      },
+                    }}
+                  >
+                    {card.content}
+                  </motion.button>
+                )
+              })}
+            </AnimatePresence>
+          </motion.div>
 
           <AnimatePresence>
             {toast ? (
               <motion.div
                 className="board-popup"
-                key={toast.id}
+                key={toast?.id}
                 role="status"
                 aria-live="polite"
                 initial={{ opacity: 0 }}
@@ -512,7 +507,7 @@ function App() {
                 exit={{ opacity: 0 }}
                 transition={{ duration: TOAST_ANIMATION_SECONDS, ease: 'easeOut' }}
               >
-                {toast.text}
+                {toast?.text}
               </motion.div>
             ) : null}
           </AnimatePresence>

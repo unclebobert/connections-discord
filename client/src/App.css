@@ -98,7 +98,7 @@
 .game-instruction {
   margin-bottom: clamp(6px, 1.8svh, 16px);
   color: var(--heading-text);
-  font-weight: 600;
+  font-weight: 400;
 }
 
 .board-frame {
@@ -204,8 +204,8 @@
   background: #efefe6;
   color: #111;
   font: inherit;
-  font-size: clamp(10px, 2.8vw, 18px);
-  font-weight: 800;
+  font-size: 20px;
+  font-weight: 700;
   line-height: 1.15;
   letter-spacing: 0;
   text-transform: uppercase;
@@ -237,23 +237,19 @@
 
 .board-popup {
   position: absolute;
-  z-index: 10;
+  translate: -50% -50%;
   top: 50%;
   left: 50%;
-  width: clamp(86px, 17svh, 124px);
-  min-height: clamp(86px, 17svh, 124px);
-  display: grid;
-  place-items: center;
-  padding: clamp(8px, 2svh, 14px);
+  z-index: 10;
+  display: flex;
+  padding: 16px;
   border-radius: 20px;
   background: rgba(17, 17, 17, 0.94);
   color: #fff;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.24);
-  font-size: clamp(16px, 2.8svh, 20px);
-  font-weight: 800;
-  line-height: 1.15;
+  font-size: 16px;
+  font-weight: 700;
   text-align: center;
-  translate: -50% -50%;
   pointer-events: none;
 }
 
@@ -310,7 +306,7 @@
   cursor: not-allowed;
 }
 
-.actions .primary-action {
+.actions .primary-action:not(:disabled) {
   background: #111;
   color: #fff;
 }
