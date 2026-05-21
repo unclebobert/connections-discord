@@ -1,5 +1,5 @@
 .app-shell {
-  width: min(100%, 720px);
+  width: min(100%, 1180px);
   height: 100svh;
   margin: 0 auto;
   padding: clamp(10px, 3svh, 28px) 18px clamp(10px, 3.8svh, 36px);
@@ -10,6 +10,7 @@
 }
 
 .app-state {
+  width: min(100%, 720px);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -18,6 +19,7 @@
 }
 
 .title-screen {
+  width: min(100%, 720px);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -103,11 +105,15 @@
 
 .board-frame {
   --board-gap: clamp(5px, 1.1svh, 8px);
-  --board-max-height: calc(320px + (var(--board-gap) * 3));
+  --board-max-width: min(100%, 1100px);
+  --board-max-height: min(
+    calc(520px + (var(--board-gap) * 3)),
+    calc(55svw - 20px)
+  );
 
   position: relative;
   flex: 1 1 min(100%, var(--board-max-height));
-  width: min(100%, 640px);
+  width: var(--board-max-width);
   min-height: 160px;
   max-height: var(--board-max-height);
 }
@@ -117,8 +123,8 @@
   height: 100%;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  grid-template-rows: repeat(4, minmax(24px, 80px));
-  grid-auto-rows: minmax(24px, 80px);
+  grid-template-rows: repeat(4, minmax(24px, 1fr));
+  grid-auto-rows: minmax(24px, 1fr);
   gap: var(--board-gap);
   position: relative;
 }
@@ -195,7 +201,6 @@
 }
 
 .word-card {
-  max-height: 80px;
   min-height: 0;
   height: 100%;
   padding: clamp(4px, 1svh, 8px);
