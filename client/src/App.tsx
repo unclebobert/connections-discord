@@ -7,7 +7,7 @@ import { type GameCategory, type PlayCard, type GameData, API_BASE_URL } from '.
 
 const MAX_MISTAKES = 4
 const INCORRECT_SHAKE_ANIMATION_MS = 420
-const CORRECT_SWAP_ANIMATION_MS = 500
+const CORRECT_SWAP_ANIMATION_MS = 700
 const SOLVED_GROUP_REVEAL_DELAY_MS = 100
 const TOAST_MS = 1150
 const GUESS_JUMP_ANIMATION_MS = 1000
