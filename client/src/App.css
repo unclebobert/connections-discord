@@ -18,6 +18,129 @@
   gap: clamp(8px, 1.8svh, 12px);
 }
 
+.progress-panel {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 20;
+  width: 168px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08);
+}
+
+.progress-panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: var(--heading-text);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.progress-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #c9c9c2;
+}
+
+.progress-status.connected {
+  background: #6aaa64;
+}
+
+.progress-player-list {
+  display: grid;
+  gap: 8px;
+}
+
+.progress-player {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 48px;
+}
+
+.progress-player.current {
+  color: var(--heading-text);
+}
+
+.progress-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: #a0c35a;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.progress-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.progress-details {
+  min-width: 0;
+}
+
+.progress-name-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-bottom: 5px;
+}
+
+.progress-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--heading-text);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-result {
+  flex: 0 0 auto;
+  color: var(--muted-text);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.progress-mini-board {
+  display: grid;
+  grid-template-columns: repeat(4, 14px);
+  gap: 3px;
+}
+
+.progress-mini-cell {
+  width: 14px;
+  height: 14px;
+  border: 1px solid #d4d4cc;
+  background: #fff;
+}
+
+.progress-mini-cell.solved {
+  border-color: transparent;
+}
+
+.progress-empty {
+  color: var(--muted-text);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
 .title-screen {
   width: min(100%, 720px);
   display: flex;
@@ -323,6 +446,17 @@
 @media (max-width: 600px) {
   .app-shell {
     padding: clamp(8px, 2.5svh, 22px) 12px clamp(8px, 3svh, 28px);
+  }
+
+  .progress-panel {
+    position: static;
+    width: min(100%, 320px);
+    margin: 0 auto clamp(8px, 1.5svh, 12px);
+    padding: 8px;
+  }
+
+  .progress-player-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .title-screen h1 {

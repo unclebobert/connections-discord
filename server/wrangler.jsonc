@@ -23,6 +23,22 @@
       "binding": "KV",
       "id": "edc39aa249e14ed9af53b3c0f299748d"
     }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PROGRESS_ROOMS",
+        "class_name": "ProgressRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ProgressRoom"
+      ]
+    }
   ]
   // "compatibility_flags": [
   //   "nodejs_compat"

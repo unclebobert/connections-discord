@@ -3,7 +3,8 @@ import { AnimatePresence, motion } from 'motion/react'
 import connectionsLogo from './assets/connections.svg'
 import './App.css'
 
-import { type GameCategory, type PlayCard, type GameData, API_BASE_URL } from './lib'
+import { discordSessionPromise, type DiscordSession } from './discord'
+import { type GameCategory, type PlayCard, type GameData, API_BASE_URL, getProgressWebSocketUrl } from './lib'
 
 const MAX_MISTAKES = 4
 const INCORRECT_SHAKE_ANIMATION_MS = 420
@@ -25,6 +26,18 @@ const CARD_SHAKE_X = [-7, 7, -6, 5]
 const TOAST_ANIMATION_SECONDS = 0.18
 const SOLVED_GROUP_ENTER_Y = 10
 const TITLE_ENTER_Y = 10
+const MAX_PROGRESS_PLAYERS = 6
+
+interface PlayerProgress {
+  userId: string
+  username: string
+  avatarUrl: string | null
+  solvedCount: number
+  mistakesMade: number
+  completed: boolean
+  resultLabel: string | null
+  updatedAt: number
+}
 
 const categoryColors = [
   'category-yellow',
@@ -86,6 +99,22 @@ function getCardId(categoryIndex: number, card: GameCategory['cards'][number]) {
   return `${categoryIndex}-${card.position}-${card.content}`
 }
 
+function getDiscordAvatarUrl(user: DiscordSession['user']) {
+  if (!user.avatar) {
+    return null
+  }
+
+  return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`
+}
+
+function getDisplayName(user: DiscordSession['user']) {
+  return user.global_name || user.username
+}
+
+function getPlayerInitial(username: string) {
+  return username.trim().charAt(0).toUpperCase() || '?'
+}
+
 // Connections reveals a solved group only after its cards gather into the next
 // open row. We create that effect by swapping selected cards into the first four
 // unsolved slots while preserving the category's answer order.
@@ -133,8 +162,14 @@ function App() {
   const [layoutPhase, setLayoutPhase] = useState<'idle' | 'swap' | 'instant'>('idle')
   const [activeGuessIds, setActiveGuessIds] = useState<string[]>([])
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null)
+  const [discordSession, setDiscordSession] = useState<DiscordSession | null>(null)
+  const [progressPlayers, setProgressPlayers] = useState<PlayerProgress[]>([])
+  const [isProgressSocketOpen, setIsProgressSocketOpen] = useState(false)
   const animationTimers = useRef<number[]>([])
   const toastTimer = useRef<number | null>(null)
+  const progressSocket = useRef<WebSocket | null>(null)
+  const reportedProgress = useRef<PlayerProgress | null>(null)
+  const puzzleDate = useMemo(() => formatPuzzleDate(new Date()), [])
 
   // Motion layout transitions are normally gentle, but we temporarily speed or
   // disable them during the correct-guess swap/reveal sequence.
@@ -149,10 +184,7 @@ function App() {
   }
 
   useEffect(() => {
-    const today = new Date()
-    const dateFormatted = formatPuzzleDate(today)
-
-    fetch(`${API_BASE_URL}/connections/${dateFormatted}`)
+    fetch(`${API_BASE_URL}/connections/${puzzleDate}`)
       .then((response) => {
         if (!response.ok) {
           throw new Error('Unable to load today\'s puzzle.')
@@ -168,15 +200,37 @@ function App() {
         console.error('Error fetching data:', fetchError)
         setError('Could not load today\'s Connections puzzle.')
       })
+  }, [puzzleDate])
+
+  useEffect(() => {
+    let isCancelled = false
+
+    discordSessionPromise
+      .then((session) => {
+        if (!isCancelled) {
+          setDiscordSession(session)
+        }
+      })
+      .catch((sessionError) => {
+        console.error('Unable to initialise Discord progress sharing:', sessionError)
+      })
+
+    return () => {
+      isCancelled = true
+    }
   }, [])
 
   useEffect(() => {
+    const queuedAnimationTimers = animationTimers.current
+
     return () => {
-      animationTimers.current.forEach((timer) => window.clearTimeout(timer))
+      queuedAnimationTimers.forEach((timer) => window.clearTimeout(timer))
 
       if (toastTimer.current) {
         window.clearTimeout(toastTimer.current)
       }
+
+      progressSocket.current?.close()
     }
   }, [])
 
@@ -217,6 +271,98 @@ function App() {
 
     return jumpOrder
   }, [selectedIds, unsolvedCards])
+
+  const currentPlayerProgress = useMemo<PlayerProgress | null>(() => {
+    if (!discordSession) {
+      return null
+    }
+
+    const hasCompleted = isWon || isGameOver
+    const mistakesMade = MAX_MISTAKES - mistakesRemaining
+
+    return {
+      userId: discordSession.user.id,
+      username: getDisplayName(discordSession.user),
+      avatarUrl: getDiscordAvatarUrl(discordSession.user),
+      solvedCount: solvedCategories.length,
+      mistakesMade,
+      completed: hasCompleted,
+      resultLabel: isWon ? getVictoryMessage(mistakesMade) : null,
+      updatedAt: 0,
+    }
+  }, [discordSession, isGameOver, isWon, mistakesRemaining, solvedCategories.length])
+
+  const displayedProgressPlayers = useMemo(
+    () => progressPlayers.slice(0, MAX_PROGRESS_PLAYERS),
+    [progressPlayers],
+  )
+
+  useEffect(() => {
+    if (!discordSession?.guildId) {
+      return
+    }
+
+    const socket = new WebSocket(getProgressWebSocketUrl(discordSession.guildId, puzzleDate))
+    progressSocket.current = socket
+
+    socket.addEventListener('open', () => {
+      setIsProgressSocketOpen(true)
+    })
+    socket.addEventListener('close', () => {
+      setIsProgressSocketOpen(false)
+    })
+    socket.addEventListener('error', () => {
+      setIsProgressSocketOpen(false)
+    })
+    socket.addEventListener('message', (event) => {
+      try {
+        const message = JSON.parse(String(event.data)) as {
+          type?: string
+          players?: PlayerProgress[]
+        }
+
+        if (message.type === 'progress:snapshot' && Array.isArray(message.players)) {
+          setProgressPlayers(message.players)
+        }
+      } catch (messageError) {
+        console.error('Unable to read progress update:', messageError)
+      }
+    })
+
+    return () => {
+      if (progressSocket.current === socket) {
+        progressSocket.current = null
+      }
+
+      socket.close()
+    }
+  }, [discordSession?.guildId, puzzleDate])
+
+  useEffect(() => {
+    const socket = progressSocket.current
+    if (!currentPlayerProgress || !isProgressSocketOpen || !socket) {
+      return
+    }
+
+    const previousProgress = reportedProgress.current
+    const nextProgress = previousProgress
+      ? {
+          ...currentPlayerProgress,
+          solvedCount: Math.max(previousProgress.solvedCount, currentPlayerProgress.solvedCount),
+          mistakesMade: Math.max(previousProgress.mistakesMade, currentPlayerProgress.mistakesMade),
+          completed: previousProgress.completed || currentPlayerProgress.completed,
+          resultLabel: previousProgress.completed
+            ? previousProgress.resultLabel
+            : currentPlayerProgress.resultLabel,
+        }
+      : currentPlayerProgress
+
+    reportedProgress.current = nextProgress
+    socket.send(JSON.stringify({
+      type: 'progress:update',
+      player: nextProgress,
+    }))
+  }, [currentPlayerProgress, isProgressSocketOpen])
 
   function queueAnimation(callback: () => void, delay: number) {
     const timer = window.setTimeout(callback, delay)
@@ -413,6 +559,51 @@ function App() {
 
   return (
     <main className="app-shell">
+      {discordSession?.guildId ? (
+        <aside className="progress-panel" aria-label="Guild progress">
+          <div className="progress-panel-title">
+            <span>Guild progress</span>
+            <span className={`progress-status${isProgressSocketOpen ? ' connected' : ''}`} />
+          </div>
+          {displayedProgressPlayers.length > 0 ? (
+            <div className="progress-player-list">
+              {displayedProgressPlayers.map((player) => (
+                <div
+                  className={`progress-player${player.userId === discordSession.user.id ? ' current' : ''}`}
+                  key={player.userId}
+                >
+                  <div className="progress-avatar" aria-hidden="true">
+                    {player.avatarUrl ? (
+                      <img src={player.avatarUrl} alt="" />
+                    ) : (
+                      <span>{getPlayerInitial(player.username)}</span>
+                    )}
+                  </div>
+                  <div className="progress-details">
+                    <div className="progress-name-row">
+                      <span className="progress-name">{player.username}</span>
+                      {player.resultLabel ? (
+                        <span className="progress-result">{player.resultLabel}</span>
+                      ) : null}
+                    </div>
+                    <div className="progress-mini-board" aria-label={`${player.solvedCount} groups solved`}>
+                      {Array.from({ length: data.categories.length }).map((_, index) => (
+                        <span
+                          className={`progress-mini-cell${index < player.solvedCount ? ` solved ${categoryColors[index]}` : ''}`}
+                          key={index}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="progress-empty">No progress yet</p>
+          )}
+        </aside>
+      ) : null}
+
       <header className="game-header">
         <div className="brand">
           <img className="app-logo" src={connectionsLogo} alt="" />

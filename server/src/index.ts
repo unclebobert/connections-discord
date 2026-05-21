@@ -1,13 +1,159 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors';
 
-import { KVNamespace } from '@cloudflare/workers-types';
+import {
+  DurableObjectNamespace,
+  DurableObjectState,
+  KVNamespace,
+} from '@cloudflare/workers-types';
+
+type PlayerProgress = {
+  userId: string;
+  username: string;
+  avatarUrl: string | null;
+  solvedCount: number;
+  mistakesMade: number;
+  completed: boolean;
+  resultLabel: string | null;
+  updatedAt: number;
+};
+
+type ProgressUpdateMessage = {
+  type: 'progress:update';
+  player: PlayerProgress;
+};
+
+type ProgressSnapshotMessage = {
+  type: 'progress:snapshot';
+  players: PlayerProgress[];
+};
+
+const PROGRESS_PLAYER_PREFIX = 'player:';
+const MAX_DISPLAY_NAME_LENGTH = 64;
+const MAX_AVATAR_URL_LENGTH = 512;
 
 type Bindings = {
   CLIENT_ID: string;
   CLIENT_SECRET: string;
   KV: KVNamespace;
+  PROGRESS_ROOMS: DurableObjectNamespace;
 };
+
+function clampProgressNumber(value: unknown, min: number, max: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+function normaliseProgressUpdate(message: unknown): PlayerProgress | null {
+  if (
+    !message ||
+    typeof message !== 'object' ||
+    (message as { type?: unknown }).type !== 'progress:update'
+  ) {
+    return null;
+  }
+
+  const player = (message as Partial<ProgressUpdateMessage>).player;
+  if (!player || typeof player !== 'object') {
+    return null;
+  }
+
+  if (typeof player.userId !== 'string' || player.userId.length === 0) {
+    return null;
+  }
+
+  const username = typeof player.username === 'string' && player.username.trim().length > 0
+    ? player.username.trim().slice(0, MAX_DISPLAY_NAME_LENGTH)
+    : 'Player';
+  const avatarUrl = typeof player.avatarUrl === 'string'
+    ? player.avatarUrl.slice(0, MAX_AVATAR_URL_LENGTH)
+    : null;
+
+  return {
+    userId: player.userId,
+    username,
+    avatarUrl,
+    solvedCount: clampProgressNumber(player.solvedCount, 0, 4),
+    mistakesMade: clampProgressNumber(player.mistakesMade, 0, 4),
+    completed: Boolean(player.completed),
+    resultLabel: typeof player.resultLabel === 'string' ? player.resultLabel.slice(0, 24) : null,
+    updatedAt: Date.now(),
+  };
+}
+
+export class ProgressRoom {
+  constructor(private state: DurableObjectState) {}
+
+  async fetch(request: Request) {
+    if (request.headers.get('Upgrade') !== 'websocket') {
+      return new Response('Expected websocket upgrade', { status: 426 });
+    }
+
+    const webSocketPair = new WebSocketPair();
+    const [client, server] = Object.values(webSocketPair) as [WebSocket, WebSocket];
+
+    this.state.acceptWebSocket(server);
+    await this.sendSnapshot(server);
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
+  }
+
+  async webSocketMessage(_: WebSocket, message: string | ArrayBuffer) {
+    if (typeof message !== 'string') {
+      return;
+    }
+
+    let parsedMessage: unknown;
+    try {
+      parsedMessage = JSON.parse(message);
+    } catch {
+      return;
+    }
+
+    const playerProgress = normaliseProgressUpdate(parsedMessage);
+    if (!playerProgress) {
+      return;
+    }
+
+    await this.state.storage.put(`${PROGRESS_PLAYER_PREFIX}${playerProgress.userId}`, playerProgress);
+    await this.broadcastSnapshot();
+  }
+
+  private async getPlayers() {
+    const storedPlayers = await this.state.storage.list<PlayerProgress>({
+      prefix: PROGRESS_PLAYER_PREFIX,
+    });
+
+    return [...storedPlayers.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  private async sendSnapshot(socket: WebSocket) {
+    const message: ProgressSnapshotMessage = {
+      type: 'progress:snapshot',
+      players: await this.getPlayers(),
+    };
+
+    socket.send(JSON.stringify(message));
+  }
+
+  private async broadcastSnapshot() {
+    const message: ProgressSnapshotMessage = {
+      type: 'progress:snapshot',
+      players: await this.getPlayers(),
+    };
+    const serializedMessage = JSON.stringify(message);
+
+    for (const socket of this.state.getWebSockets()) {
+      socket.send(serializedMessage);
+    }
+  }
+}
 
 // NOTE: endpoints should never include /api since all requests starting with
 // /api/* will be routed to this server and the prefix gets removed
@@ -17,6 +163,20 @@ const app = new Hono<{ Bindings: Bindings }>()
 app.use('*', cors())
 
 app.get('/', (c) => c.text('Connections Discord Bot Server'))
+
+app.get('/progress/:guildId/:date', async (c) => {
+  const guildId = c.req.param('guildId');
+  const date = c.req.param('date');
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{8,32}$/.test(guildId)) {
+    return c.json({ error: 'Invalid progress room' }, 400);
+  }
+
+  const id = c.env.PROGRESS_ROOMS.idFromName(`${guildId}:${date}`);
+  const room = c.env.PROGRESS_ROOMS.get(id);
+
+  return room.fetch(c.req.raw);
+});
 
 app.get('/connections/:date', async (c) => {
   const date = c.req.param('date');
