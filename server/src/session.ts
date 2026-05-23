@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 
-type PlayerProgress = Array<[number, number, number, number]>;
+type PlayerGuess = [number, number, number, number];
+type PlayerProgress = Array<PlayerGuess>;
 
 export class ProgressRoom extends DurableObject<Env> {
   sql: SqlStorage;
@@ -51,6 +52,25 @@ export class ProgressRoom extends DurableObject<Env> {
     this.users.set(userId, server);
 
     return client;
+  }
+  
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    // listen for updates and push them to all connected clients
+    if (message instanceof ArrayBuffer) {
+      throw new Error('Binary messages are not supported');
+    }
+    try {
+      const { userId, guess } = JSON.parse(message);
+      const cursor = this.sql.exec(`
+        SELECT * FROM progress
+        WHERE user_id = ?
+      `, [userId]);
+      const progress: PlayerProgress = JSON.parse(cursor.toArray()[0].progress as string);
+      progress.push(guess);
+      this.pushProgressUpdate(userId, progress);
+    } catch (error) {
+      console.error('Error parsing progress update:', error);
+    }
   }
 
   async pushProgressUpdate(userId: string, progress: PlayerProgress) {

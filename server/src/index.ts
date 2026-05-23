@@ -18,7 +18,7 @@ app.use('*', cors())
 
 app.get('/', (c) => c.text('Connections Discord Bot Server'))
 
-app.get('/ws/:guildId/:date', async (c) => {
+app.get('/ws/:guildId/:date/:userId', async (c) => {
   const upgradeHeader = c.req.header('Upgrade');
   if (!upgradeHeader || upgradeHeader !== 'websocket') {
     return new Response('Worker expected Upgrade: websocket', {
@@ -28,7 +28,7 @@ app.get('/ws/:guildId/:date', async (c) => {
 
   const guildId = c.req.param('guildId');
   const date = c.req.param('date');
-  const userId = c.req.query('userId');
+  const userId = c.req.param('userId');
   if (!guildId || !date || !userId) {
     return new Response('Missing guildId, date, or userId', {
       status: 400,
