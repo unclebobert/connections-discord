@@ -167,7 +167,7 @@ export class ProgressRoom extends DurableObject<Env> {
       ON CONFLICT(user_id) DO UPDATE SET
         display_name=excluded.display_name,
         avatar_url=excluded.avatar_url;
-    `, [userId, profile.displayName, profile.avatarUrl]);
+    `, userId, profile.displayName, profile.avatarUrl);
   }
 
   async saveGuess(userId: string, newGuess: PlayerGuess) {
@@ -182,7 +182,7 @@ export class ProgressRoom extends DurableObject<Env> {
       INSERT INTO progress (user_id, progress)
       VALUES (?, ?)
       ON CONFLICT(user_id) DO UPDATE SET progress=excluded.progress;
-    `, [userId, JSON.stringify(progress)]);
+    `, userId, JSON.stringify(progress));
     // Send progress update to all connected clients via websocket
     for (const [observerUserId, socket] of this.users.entries()) {
       if (observerUserId === userId) continue; // Don't send progress update to the user who made the update
