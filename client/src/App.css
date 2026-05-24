@@ -12,8 +12,8 @@
 .game-shell {
   width: min(100%, 1240px);
   display: grid;
-  grid-template-columns: 184px minmax(0, 1fr);
-  gap: 18px;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 12px;
   overflow: hidden;
 }
 
@@ -39,71 +39,44 @@
 
 .progress-panel {
   min-height: 0;
-  padding: 4px 12px 4px 0;
-  border-right: 1px solid var(--border);
+  padding: 2px 4px 2px 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-.progress-panel-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-  color: var(--heading-text);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.progress-status {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #c9c9c2;
-}
-
-.progress-status.connected {
-  background: #6aaa64;
-}
-
 .progress-player-list {
   min-height: 0;
-  padding-right: 4px;
+  padding-right: 2px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   overflow-x: hidden;
   overflow-y: auto;
 }
 
 .progress-player {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 8px;
   align-items: center;
-  min-height: 126px;
-  padding: 10px;
+  min-height: 68px;
+  padding: 6px;
   border: 1px solid #d6d7dc;
-  border-radius: 14px;
+  border-radius: 8px;
   background: #fff;
 }
 
-.progress-player.current {
-  color: var(--heading-text);
-}
-
 .progress-avatar {
-  width: 64px;
-  height: 64px;
+  width: 34px;
+  height: 34px;
   border-radius: 999px;
   display: grid;
   place-items: center;
   overflow: hidden;
   background: #5865f2;
   color: #fff;
-  font-size: 24px;
+  font-size: 14px;
   font-weight: 800;
 }
 
@@ -113,45 +86,16 @@
   object-fit: cover;
 }
 
-.progress-details {
-  min-width: 0;
-}
-
-.progress-name-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  margin-bottom: 7px;
-}
-
-.progress-name {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--heading-text);
-  font-size: 12px;
-  font-weight: 800;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.progress-result {
-  flex: 0 0 auto;
-  color: var(--muted-text);
-  font-size: 10px;
-  font-weight: 700;
-}
-
 .progress-grid {
   display: grid;
-  grid-template-columns: repeat(4, 13px);
-  grid-auto-rows: 13px;
-  gap: 4px;
+  grid-template-columns: repeat(4, 9px);
+  grid-auto-rows: 9px;
+  gap: 2px;
 }
 
 .progress-grid-cell {
-  width: 13px;
-  height: 13px;
+  width: 9px;
+  height: 9px;
   border: 1px solid #2f3136;
   background: #fff;
 }
@@ -168,12 +112,6 @@
 .progress-grid-cell.correct,
 .progress-grid-cell.revealed {
   border-color: #111;
-}
-
-.progress-empty {
-  color: var(--muted-text);
-  font-size: 12px;
-  line-height: 1.25;
 }
 
 .title-screen {
@@ -510,11 +448,9 @@
   }
 
   .progress-panel {
-    min-height: 126px;
-    max-height: 150px;
-    padding: 0 0 10px;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
+    min-height: 84px;
+    max-height: 96px;
+    padding: 0 0 6px;
   }
 
   .progress-player-list {
@@ -525,36 +461,36 @@
   }
 
   .progress-player {
-    width: 176px;
-    flex: 0 0 176px;
+    width: 98px;
+    flex: 0 0 98px;
   }
 }
 
 @media (max-width: 600px) {
   .progress-player {
-    grid-template-columns: 54px minmax(0, 1fr);
-    gap: 10px;
-    width: 164px;
-    flex-basis: 164px;
-    min-height: 118px;
-    padding: 8px;
+    grid-template-columns: 30px minmax(0, 1fr);
+    gap: 7px;
+    width: 92px;
+    flex-basis: 92px;
+    min-height: 62px;
+    padding: 5px;
   }
 
   .progress-avatar {
-    width: 54px;
-    height: 54px;
-    font-size: 20px;
+    width: 30px;
+    height: 30px;
+    font-size: 12px;
   }
 
   .progress-grid {
-    grid-template-columns: repeat(4, 12px);
-    grid-auto-rows: 12px;
-    gap: 3px;
+    grid-template-columns: repeat(4, 8px);
+    grid-auto-rows: 8px;
+    gap: 2px;
   }
 
   .progress-grid-cell {
-    width: 12px;
-    height: 12px;
+    width: 8px;
+    height: 8px;
   }
 
   .title-screen h1 {

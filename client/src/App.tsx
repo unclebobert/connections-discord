@@ -143,10 +143,6 @@ function getShortUserId(userId: string) {
   return userId.length > 4 ? userId.slice(-4) : userId
 }
 
-function getProgressPlayerName(player: ProgressPlayer) {
-  return player.profile?.displayName || `Player ${getShortUserId(player.userId)}`
-}
-
 function getProgressInitial(player: ProgressPlayer) {
   const name = player.profile?.displayName
   if (name) {
@@ -154,22 +150,6 @@ function getProgressInitial(player: ProgressPlayer) {
   }
 
   return getShortUserId(player.userId).slice(0, 2).toUpperCase() || '?'
-}
-
-function getProgressResult(player: ProgressSummary) {
-  if (player.isWon) {
-    return getVictoryMessage(player.mistakesMade)
-  }
-
-  if (player.isGameOver) {
-    return 'Out'
-  }
-
-  if (player.mistakesMade === 0) {
-    return null
-  }
-
-  return `${player.mistakesMade} miss${player.mistakesMade === 1 ? '' : 'es'}`
 }
 
 function getCategoryIndexByPosition(categories: GameCategory[], position: number) {
@@ -240,7 +220,6 @@ function App() {
     connectionKey: string
     progress: PlayerProgress
   } | null>(null)
-  const [openProgressConnectionKey, setOpenProgressConnectionKey] = useState<string | null>(null)
   const animationTimers = useRef<number[]>([])
   const toastTimer = useRef<number | null>(null)
   const progressSocket = useRef<WebSocket | null>(null)
@@ -251,7 +230,6 @@ function App() {
   const progressConnectionKey = discordSession?.guildId && discordSession.user.id
     ? `${discordSession.guildId}:${discordSession.user.id}:${puzzleDate}`
     : null
-  const isProgressSocketOpen = openProgressConnectionKey === progressConnectionKey
 
   const layoutTransition = useMemo(() => ({
     duration: layoutPhase === 'instant'
@@ -342,14 +320,7 @@ function App() {
     progressSocket.current = socket
 
     socket.addEventListener('open', () => {
-      setOpenProgressConnectionKey(connectionKey)
       flushProgressQueue(socket, userId, pendingProgressGuesses)
-    })
-    socket.addEventListener('close', () => {
-      setOpenProgressConnectionKey((currentKey) => currentKey === connectionKey ? null : currentKey)
-    })
-    socket.addEventListener('error', () => {
-      setOpenProgressConnectionKey((currentKey) => currentKey === connectionKey ? null : currentKey)
     })
     socket.addEventListener('message', (event) => {
       const message = parseProgressMessage(String(event.data))
@@ -666,7 +637,6 @@ function App() {
       {discordSession?.guildId ? (
         <ProgressPanel
           categories={data.categories}
-          isConnected={isProgressSocketOpen}
           players={displayedProgressPlayers}
         />
       ) : null}
@@ -821,24 +791,16 @@ function TitleScreen({ data, onPlay }: { data: GameData; onPlay: () => void }) {
 
 function ProgressPanel({
   categories,
-  isConnected,
   players,
 }: {
   categories: GameCategory[]
-  isConnected: boolean
   players: ProgressPlayer[]
 }) {
   return (
     <aside className="progress-panel" aria-label="Guild progress">
-      <div className="progress-panel-title">
-        <span>Guild progress</span>
-        <span className={`progress-status${isConnected ? ' connected' : ''}`} />
-      </div>
       {players.length > 0 ? (
         <div className="progress-player-list">
           {players.map((player) => {
-            const result = getProgressResult(player)
-            const playerName = getProgressPlayerName(player)
             const rows = getProgressRows(player, categories)
 
             return (
@@ -850,29 +812,19 @@ function ProgressPanel({
                     <span>{getProgressInitial(player)}</span>
                   )}
                 </div>
-                <div className="progress-details">
-                  <div className="progress-name-row">
-                    <span className="progress-name">{playerName}</span>
-                    {result ? (
-                      <span className="progress-result">{result}</span>
-                    ) : null}
-                  </div>
-                  <div
-                    className="progress-grid"
-                    aria-label={`${player.progress.length} guesses, ${player.solvedCategories.length} groups solved`}
-                  >
-                    {rows.flat().map((cell) => (
-                      <span className={cell.className} key={cell.key} />
-                    ))}
-                  </div>
+                <div
+                  className="progress-grid"
+                  aria-label={`${player.progress.length} guesses, ${player.solvedCategories.length} groups solved`}
+                >
+                  {rows.flat().map((cell) => (
+                    <span className={cell.className} key={cell.key} />
+                  ))}
                 </div>
               </div>
             )
           })}
         </div>
-      ) : (
-        <p className="progress-empty">No updates yet</p>
-      )}
+      ) : null}
     </aside>
   )
 }
