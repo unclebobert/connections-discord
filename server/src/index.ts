@@ -9,6 +9,14 @@ type Bindings = {
   PROGRESS_ROOMS: DurableObjectNamespace<ProgressRoom>;
 };
 
+type DiscordUser = {
+  id: string;
+};
+
+type DiscordGuild = {
+  id: string;
+};
+
 // NOTE: endpoints should never include /api since all requests starting with
 // /api/* will be routed to this server and the prefix gets removed
 // i.e. the client should prepend /api before making requests to the server *if in prod*,
@@ -55,6 +63,16 @@ app.get('/ws/:guildId/:date/:userId', async (c) => {
   if (!/^\d{12,24}$/.test(guildId) || !userId || !/^\d{12,24}$/.test(userId)) {
     return c.json({ error: 'Invalid guild ID or user ID' }, 400);
   }
+  const accessToken = c.req.query('access_token');
+  if (!accessToken) {
+    return c.json({ error: 'Missing access token' }, 401);
+  }
+
+  const authResult = await validateDiscordAccess(accessToken, userId, guildId);
+  if (!authResult.ok) {
+    return c.json({ error: authResult.error }, authResult.status);
+  }
+
   const room = c.env.PROGRESS_ROOMS.getByName(`${guildId}:${date}`);
 
   const clientWebSocket = await room.join(userId);
@@ -63,6 +81,52 @@ app.get('/ws/:guildId/:date/:userId', async (c) => {
     webSocket: clientWebSocket as unknown as WebSocket,
   });
 });
+
+async function validateDiscordAccess(
+  accessToken: string,
+  expectedUserId: string,
+  expectedGuildId: string,
+): Promise<{ ok: true } | { ok: false; status: 401 | 403 | 502; error: string }> {
+  const userResponse = await fetch('https://discord.com/api/users/@me', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (userResponse.status === 401) {
+    return { ok: false, status: 401, error: 'Invalid access token' };
+  }
+
+  if (!userResponse.ok) {
+    return { ok: false, status: 502, error: 'Unable to verify Discord user' };
+  }
+
+  const user = await userResponse.json<DiscordUser>();
+  if (user.id !== expectedUserId) {
+    return { ok: false, status: 403, error: 'Access token does not match user' };
+  }
+
+  const guildsResponse = await fetch('https://discord.com/api/users/@me/guilds', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (guildsResponse.status === 401) {
+    return { ok: false, status: 401, error: 'Invalid access token' };
+  }
+
+  if (!guildsResponse.ok) {
+    return { ok: false, status: 502, error: 'Unable to verify Discord guild access' };
+  }
+
+  const guilds = await guildsResponse.json<DiscordGuild[]>();
+  if (!guilds.some((guild) => guild.id === expectedGuildId)) {
+    return { ok: false, status: 403, error: 'User is not a member of this guild' };
+  }
+
+  return { ok: true };
+}
 
 app.get('/connections/:date', async (c) => {
   const date = c.req.param('date');

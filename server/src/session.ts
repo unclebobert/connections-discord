@@ -36,11 +36,17 @@ export class ProgressRoom extends DurableObject<Env> {
     }
   }
 
+  removeSocket(ws: WebSocket) {
+    const userId = ws.deserializeAttachment();
+    if (this.users.get(userId) === ws) {
+      this.users.delete(userId);
+    }
+  }
+
   async join(userId: string) {
     const existingSocket = this.users.get(userId);
     if (existingSocket && existingSocket.readyState === WebSocket.OPEN) {
-      // If the user is already connected, return the existing socket instead of creating a new one
-      return existingSocket;
+      existingSocket.close(1000, 'New connection established');
     }
 
     const webSocketPair = new WebSocketPair();
@@ -52,10 +58,8 @@ export class ProgressRoom extends DurableObject<Env> {
     this.users.set(userId, server);
 
     // send initial progress of all users to the newly connected client
-    const usersProgress: Record<string, PlayerProgress> = {};
-    for (const [userId, progress] of this.userProgress.entries()) {
-      usersProgress[userId] = progress;
-    }
+    const usersProgress = Array.from(this.userProgress.entries())
+      .map(([userId, progress]) => ({ userId, progress }));
     server.send(JSON.stringify(usersProgress));
 
     return client;
@@ -68,20 +72,37 @@ export class ProgressRoom extends DurableObject<Env> {
       return;
     }
     try {
-      const { userId, guess } = JSON.parse(message);
-      this.saveGuess(userId, guess);
+      const { guess } = JSON.parse(message);
+      if (!(guess instanceof Array)
+        || guess.length !== 4
+        || !guess.every(num => typeof num === 'number')
+      ) {
+        console.error('Invalid guess format');
+        return;
+      }
+      const userId = ws.deserializeAttachment();
+      this.saveGuess(userId, guess as PlayerGuess);
     } catch (error) {
       console.error('Error parsing guess:', error);
     }
   }
 
-  async saveGuess(userId: string, progress: PlayerGuess) {
+  async webSocketClose(ws: WebSocket) {
+    this.removeSocket(ws);
+  }
+
+  async webSocketError(ws: WebSocket) {
+    this.removeSocket(ws);
+  }
+
+  async saveGuess(userId: string, newGuess: PlayerGuess) {
     // Update in-memory progress and persist to SQL storage
     if (this.userProgress.has(userId)) {
-      this.userProgress.get(userId)?.push(progress);
+      this.userProgress.get(userId)?.push(newGuess);
     } else {
-      this.userProgress.set(userId, [progress]);
+      this.userProgress.set(userId, [newGuess]);
     }
+    const progress = this.userProgress.get(userId)!;
     this.sql.exec(`
       INSERT INTO progress (user_id, progress)
       VALUES (?, ?)
@@ -90,7 +111,17 @@ export class ProgressRoom extends DurableObject<Env> {
     // Send progress update to all connected clients via websocket
     for (const [observerUserId, socket] of this.users.entries()) {
       if (observerUserId === userId) continue; // Don't send progress update to the user who made the update
-      socket.send(JSON.stringify({ userId, progress }));
+      if (socket.readyState !== WebSocket.OPEN) {
+        this.users.delete(observerUserId);
+        continue;
+      }
+
+      try {
+        socket.send(JSON.stringify({ userId, progress }));
+      } catch (error) {
+        this.users.delete(observerUserId);
+        console.error('Error sending progress update:', error);
+      }
     }
   }
 }
