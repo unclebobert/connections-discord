@@ -26,8 +26,8 @@
   ],
   "secrets": {
     "required": [
-      "CLIENT_ID",
-      "CLIENT_SECRET"
+      "VITE_DISCORD_CLIENT_ID",
+      "DISCORD_CLIENT_SECRET"
     ]
   },
   "durable_objects": {

@@ -3,8 +3,7 @@ import { cors } from 'hono/cors';
 import { ProgressRoom } from './session';
 
 type Bindings = {
-  CLIENT_ID: string;
-  CLIENT_SECRET: string;
+  VITE_DISCORD_CLIENT_ID: string;
   DISCORD_CLIENT_SECRET?: string;
   KV: KVNamespace;
   PROGRESS_ROOMS: DurableObjectNamespace<ProgressRoom>;
@@ -170,15 +169,25 @@ app.post('/token', async (c) => {
   if (!code || typeof code !== 'string') {
     return c.json({ error: 'Invalid code' }, 400);
   }
-  const clientSecret = c.env.CLIENT_SECRET ?? c.env.DISCORD_CLIENT_SECRET;
+  const clientId = c.env.VITE_DISCORD_CLIENT_ID;
+  const clientSecret = c.env.DISCORD_CLIENT_SECRET;
   const missingCredentials = [
-    !c.env.CLIENT_ID ? 'CLIENT_ID' : null,
-    !clientSecret ? 'CLIENT_SECRET or DISCORD_CLIENT_SECRET' : null,
+    !clientId ? 'VITE_DISCORD_CLIENT_ID' : null,
+    !clientSecret ? 'DISCORD_CLIENT_SECRET' : null,
   ].filter((name) => name !== null);
 
   if (missingCredentials.length > 0) {
     console.error('Discord OAuth credentials are not configured:', missingCredentials);
     return c.json({ error: 'Discord OAuth credentials are not configured' }, 500);
+  }
+
+  if (!/^\d{12,24}$/.test(clientId)) {
+    console.error('Discord client ID is malformed:', {
+      length: clientId.length,
+      prefix: clientId.slice(0, 4),
+      suffix: clientId.slice(-4),
+    });
+    return c.json({ error: 'Discord OAuth credentials are malformed' }, 500);
   }
 
   // Exchange the code for an access_token
@@ -188,7 +197,7 @@ app.post('/token', async (c) => {
       'Content-Type': 'application/x-www-form-urlencoded'
     },
     body: new URLSearchParams({
-      client_id: c.env.CLIENT_ID,
+      client_id: clientId,
       client_secret: clientSecret,
       grant_type: "authorization_code",
       code,
