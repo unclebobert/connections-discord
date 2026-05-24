@@ -24,6 +24,12 @@
       "id": "edc39aa249e14ed9af53b3c0f299748d"
     }
   ],
+  "secrets": {
+    "required": [
+      "CLIENT_ID",
+      "CLIENT_SECRET"
+    ]
+  },
   "durable_objects": {
     "bindings": [
       {

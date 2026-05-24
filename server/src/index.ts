@@ -171,7 +171,13 @@ app.post('/token', async (c) => {
     return c.json({ error: 'Invalid code' }, 400);
   }
   const clientSecret = c.env.CLIENT_SECRET ?? c.env.DISCORD_CLIENT_SECRET;
-  if (!c.env.CLIENT_ID || !clientSecret) {
+  const missingCredentials = [
+    !c.env.CLIENT_ID ? 'CLIENT_ID' : null,
+    !clientSecret ? 'CLIENT_SECRET or DISCORD_CLIENT_SECRET' : null,
+  ].filter((name) => name !== null);
+
+  if (missingCredentials.length > 0) {
+    console.error('Discord OAuth credentials are not configured:', missingCredentials);
     return c.json({ error: 'Discord OAuth credentials are not configured' }, 500);
   }
 
