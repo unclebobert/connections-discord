@@ -95,13 +95,19 @@ async function validateDiscordAccess(
   expectedUserId: string,
   expectedGuildId: string,
 ): Promise<{ ok: true; profile: PlayerProfile } | { ok: false; status: 401 | 403 | 502; error: string }> {
-  const userResponse = await fetch('https://discord.com/api/users/@me', {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+  const authHeaders = {
+    Authorization: `Bearer ${accessToken}`,
+  };
+  const [userResponse, guildsResponse] = await Promise.all([
+    fetch('https://discord.com/api/users/@me', {
+      headers: authHeaders,
+    }),
+    fetch('https://discord.com/api/users/@me/guilds', {
+      headers: authHeaders,
+    }),
+  ]);
 
-  if (userResponse.status === 401) {
+  if (userResponse.status === 401 || guildsResponse.status === 401) {
     return { ok: false, status: 401, error: 'Invalid access token' };
   }
 
@@ -112,16 +118,6 @@ async function validateDiscordAccess(
   const user = await userResponse.json<DiscordUser>();
   if (user.id !== expectedUserId) {
     return { ok: false, status: 403, error: 'Access token does not match user' };
-  }
-
-  const guildsResponse = await fetch('https://discord.com/api/users/@me/guilds', {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
-
-  if (guildsResponse.status === 401) {
-    return { ok: false, status: 401, error: 'Invalid access token' };
   }
 
   if (!guildsResponse.ok) {

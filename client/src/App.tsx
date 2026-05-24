@@ -52,10 +52,12 @@ const SOLVED_GROUP_ENTER_Y = 10
 const TITLE_ENTER_Y = 10
 const MIN_PROGRESS_ROWS = 4
 const MAX_PROGRESS_ROWS = 7
+const PROGRESS_RESTORE_TIMEOUT_MS = 8000
 
 type GuessAnimation = 'correct' | 'incorrect'
 type GuessPhase = 'idle' | 'jump' | 'shake' | 'swap'
 type LayoutPhase = 'idle' | 'swap' | 'instant'
+type ProgressRestoreStatus = 'idle' | 'ready' | 'unavailable'
 
 interface ObservedProgress {
   userId: string
@@ -212,9 +214,17 @@ function App() {
   const [activeGuessIds, setActiveGuessIds] = useState<string[]>([])
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null)
   const [discordSession, setDiscordSession] = useState<DiscordSession | null>(null)
+  const [isDiscordReady, setIsDiscordReady] = useState(false)
   const [progressState, setProgressState] = useState<ProgressState>({
     connectionKey: null,
     players: [],
+  })
+  const [progressRestore, setProgressRestore] = useState<{
+    connectionKey: string | null
+    status: ProgressRestoreStatus
+  }>({
+    connectionKey: null,
+    status: 'idle',
   })
   const [ownSnapshotProgress, setOwnSnapshotProgress] = useState<{
     connectionKey: string
@@ -230,6 +240,13 @@ function App() {
   const progressConnectionKey = discordSession?.guildId && discordSession.user.id
     ? `${discordSession.guildId}:${discordSession.user.id}:${puzzleDate}`
     : null
+  const isProgressRestoreReady = isDiscordReady && (
+    !progressConnectionKey ||
+    (
+      progressRestore.connectionKey === progressConnectionKey &&
+      progressRestore.status !== 'idle'
+    )
+  )
 
   const layoutTransition = useMemo(() => ({
     duration: layoutPhase === 'instant'
@@ -280,10 +297,14 @@ function App() {
       .then((session) => {
         if (!isCancelled) {
           setDiscordSession(session)
+          setIsDiscordReady(true)
         }
       })
       .catch((sessionError) => {
         console.error('Unable to initialise Discord progress sharing:', sessionError)
+        if (!isCancelled) {
+          setIsDiscordReady(true)
+        }
       })
 
     return () => {
@@ -317,10 +338,38 @@ function App() {
     }
 
     const socket = new WebSocket(getProgressWebSocketUrl(guildId, puzzleDate, userId, accessToken))
+    let hasReceivedSnapshot = false
+    const restoreTimeout = window.setTimeout(() => {
+      if (!hasReceivedSnapshot) {
+        setProgressRestore({
+          connectionKey,
+          status: 'unavailable',
+        })
+      }
+    }, PROGRESS_RESTORE_TIMEOUT_MS)
+
     progressSocket.current = socket
 
     socket.addEventListener('open', () => {
       flushProgressQueue(socket, userId, pendingProgressGuesses)
+    })
+    socket.addEventListener('close', () => {
+      if (!hasReceivedSnapshot) {
+        window.clearTimeout(restoreTimeout)
+        setProgressRestore({
+          connectionKey,
+          status: 'unavailable',
+        })
+      }
+    })
+    socket.addEventListener('error', () => {
+      if (!hasReceivedSnapshot) {
+        window.clearTimeout(restoreTimeout)
+        setProgressRestore({
+          connectionKey,
+          status: 'unavailable',
+        })
+      }
     })
     socket.addEventListener('message', (event) => {
       const message = parseProgressMessage(String(event.data))
@@ -330,10 +379,16 @@ function App() {
       }
 
       if (message.type === 'snapshot') {
-        const ownProgress = message.players.find((player) => player.userId === userId)?.progress
-        if (ownProgress) {
-          setOwnSnapshotProgress({ connectionKey, progress: ownProgress })
-        }
+        hasReceivedSnapshot = true
+        window.clearTimeout(restoreTimeout)
+        setOwnSnapshotProgress({
+          connectionKey,
+          progress: message.players.find((player) => player.userId === userId)?.progress ?? [],
+        })
+        setProgressRestore({
+          connectionKey,
+          status: 'ready',
+        })
       }
 
       setProgressState((currentState) => ({
@@ -358,6 +413,7 @@ function App() {
         progressSocket.current = null
       }
 
+      window.clearTimeout(restoreTimeout)
       socket.close()
     }
   }, [discordSession?.accessToken, discordSession?.guildId, discordSession?.user.id, puzzleDate])
@@ -417,6 +473,7 @@ function App() {
       ...summarizeProgress(player.progress, data.categories),
     }))
   }, [data, discordSession, progressConnectionKey, progressState])
+  const hasProgressPanel = displayedProgressPlayers.length > 0
 
   useEffect(() => {
     if (!data || !ownSnapshotProgress || ownSnapshotProgress.connectionKey !== progressConnectionKey) {
@@ -431,7 +488,6 @@ function App() {
 
     hydratedProgressKey.current = progressConnectionKey
     hasReportedFinalGuess.current = summary.isWon || summary.isGameOver
-    setHasStarted(true)
     setSelectedIds([])
     setSolvedCategories(summary.solvedCategories)
     setBoardCards(buildCardsForSolvedCategories(data.categories, summary.solvedCategories))
@@ -632,9 +688,13 @@ function App() {
     return <TitleScreen data={data} onPlay={() => setHasStarted(true)} />
   }
 
+  if (!isProgressRestoreReady) {
+    return <StatusScreen message="Restoring your progress..." />
+  }
+
   return (
-    <main className={`app-shell game-shell${discordSession?.guildId ? '' : ' no-progress'}`}>
-      {discordSession?.guildId ? (
+    <main className={`app-shell game-shell${hasProgressPanel ? ' has-progress' : ' no-progress'}`}>
+      {hasProgressPanel ? (
         <ProgressPanel
           categories={data.categories}
           players={displayedProgressPlayers}

@@ -444,13 +444,17 @@
   .game-shell {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
-    gap: 10px;
+    gap: 6px;
+  }
+
+  .game-shell.has-progress .game-header {
+    display: none;
   }
 
   .progress-panel {
-    min-height: 84px;
-    max-height: 96px;
-    padding: 0 0 6px;
+    min-height: 72px;
+    max-height: 78px;
+    padding: 0 0 4px;
   }
 
   .progress-player-list {
