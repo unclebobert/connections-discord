@@ -5,6 +5,7 @@ import { ProgressRoom } from './session';
 type Bindings = {
   CLIENT_ID: string;
   CLIENT_SECRET: string;
+  DISCORD_CLIENT_SECRET?: string;
   KV: KVNamespace;
   PROGRESS_ROOMS: DurableObjectNamespace<ProgressRoom>;
 };
@@ -169,6 +170,11 @@ app.post('/token', async (c) => {
   if (!code || typeof code !== 'string') {
     return c.json({ error: 'Invalid code' }, 400);
   }
+  const clientSecret = c.env.CLIENT_SECRET ?? c.env.DISCORD_CLIENT_SECRET;
+  if (!c.env.CLIENT_ID || !clientSecret) {
+    return c.json({ error: 'Discord OAuth credentials are not configured' }, 500);
+  }
+
   // Exchange the code for an access_token
   const response = await fetch('https://discord.com/api/oauth2/token', {
     method: 'POST',
@@ -177,13 +183,18 @@ app.post('/token', async (c) => {
     },
     body: new URLSearchParams({
       client_id: c.env.CLIENT_ID,
-      client_secret: c.env.CLIENT_SECRET,
+      client_secret: clientSecret,
       grant_type: "authorization_code",
       code,
     })
   });
 
   const data = await response.json();
+  if (!response.ok) {
+    console.error('Discord token exchange failed:', data);
+    return c.json({ error: 'Discord token exchange failed' }, response.status as 400 | 401 | 500);
+  }
+
   return c.json(data);
 });
 
