@@ -11,10 +11,18 @@ type Bindings = {
 
 type DiscordUser = {
   id: string;
+  username: string;
+  global_name?: string | null;
+  avatar?: string | null;
 };
 
 type DiscordGuild = {
   id: string;
+};
+
+type PlayerProfile = {
+  displayName: string;
+  avatarUrl: string | null;
 };
 
 // NOTE: endpoints should never include /api since all requests starting with
@@ -75,7 +83,7 @@ app.get('/ws/:guildId/:date/:userId', async (c) => {
 
   const room = c.env.PROGRESS_ROOMS.getByName(`${guildId}:${date}`);
 
-  const clientWebSocket = await room.join(userId);
+  const clientWebSocket = await room.join(userId, authResult.profile);
   return c.newResponse(null, {
     status: 101,
     webSocket: clientWebSocket as unknown as WebSocket,
@@ -86,7 +94,7 @@ async function validateDiscordAccess(
   accessToken: string,
   expectedUserId: string,
   expectedGuildId: string,
-): Promise<{ ok: true } | { ok: false; status: 401 | 403 | 502; error: string }> {
+): Promise<{ ok: true; profile: PlayerProfile } | { ok: false; status: 401 | 403 | 502; error: string }> {
   const userResponse = await fetch('https://discord.com/api/users/@me', {
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -125,7 +133,15 @@ async function validateDiscordAccess(
     return { ok: false, status: 403, error: 'User is not a member of this guild' };
   }
 
-  return { ok: true };
+  return {
+    ok: true,
+    profile: {
+      displayName: user.global_name || user.username,
+      avatarUrl: user.avatar
+        ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=80`
+        : null,
+    },
+  };
 }
 
 app.get('/connections/:date', async (c) => {

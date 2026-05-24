@@ -2,11 +2,16 @@ import { DurableObject } from 'cloudflare:workers';
 
 type PlayerGuess = [number, number, number, number];
 type PlayerProgress = Array<PlayerGuess>;
+type PlayerProfile = {
+  displayName: string;
+  avatarUrl: string | null;
+};
 
 export class ProgressRoom extends DurableObject<Env> {
   sql: SqlStorage;
   users: Map<string, WebSocket>;
   userProgress: Map<string, PlayerProgress>;
+  userProfiles: Map<string, PlayerProfile>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     // Required, as we're extending the base class.
@@ -21,11 +26,21 @@ export class ProgressRoom extends DurableObject<Env> {
     }
     // Repopulate user progress from SQL storage, after hibernation
     this.userProgress = new Map();
-    const cursor = this.sql.exec(`
+    this.sql.exec(`
       CREATE TABLE IF NOT EXISTS progress (
         user_id TEXT NOT NULL PRIMARY KEY,
         progress JSON NOT NULL
       );
+    `)
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS profiles (
+        user_id TEXT NOT NULL PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        avatar_url TEXT
+      );
+    `)
+
+    const cursor = this.sql.exec(`
       SELECT * FROM progress;
     `)
     for (const { user_id: userId, progress } of cursor.toArray() as Array<{
@@ -33,6 +48,21 @@ export class ProgressRoom extends DurableObject<Env> {
       progress: string, // Stored as JSON string in SQL (?)
     }>) {
       this.userProgress.set(userId, JSON.parse(progress));
+    }
+
+    this.userProfiles = new Map();
+    const profiles = this.sql.exec(`
+      SELECT * FROM profiles;
+    `)
+    for (const { user_id: userId, display_name: displayName, avatar_url: avatarUrl } of profiles.toArray() as Array<{
+      user_id: string,
+      display_name: string,
+      avatar_url: string | null,
+    }>) {
+      this.userProfiles.set(userId, {
+        displayName,
+        avatarUrl,
+      });
     }
   }
 
@@ -43,7 +73,7 @@ export class ProgressRoom extends DurableObject<Env> {
     }
   }
 
-  async join(userId: string) {
+  async join(userId: string, profile: PlayerProfile) {
     const existingSocket = this.users.get(userId);
     if (existingSocket && existingSocket.readyState === WebSocket.OPEN) {
       existingSocket.close(1000, 'New connection established');
@@ -56,10 +86,15 @@ export class ProgressRoom extends DurableObject<Env> {
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment(userId);
     this.users.set(userId, server);
+    this.saveProfile(userId, profile);
 
     // send initial progress of all users to the newly connected client
     const usersProgress = Array.from(this.userProgress.entries())
-      .map(([userId, progress]) => ({ userId, progress }));
+      .map(([userId, progress]) => ({
+        userId,
+        progress,
+        profile: this.userProfiles.get(userId) ?? null,
+      }));
     server.send(JSON.stringify(usersProgress));
 
     return client;
@@ -95,6 +130,17 @@ export class ProgressRoom extends DurableObject<Env> {
     this.removeSocket(ws);
   }
 
+  saveProfile(userId: string, profile: PlayerProfile) {
+    this.userProfiles.set(userId, profile);
+    this.sql.exec(`
+      INSERT INTO profiles (user_id, display_name, avatar_url)
+      VALUES (?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        display_name=excluded.display_name,
+        avatar_url=excluded.avatar_url;
+    `, [userId, profile.displayName, profile.avatarUrl]);
+  }
+
   async saveGuess(userId: string, newGuess: PlayerGuess) {
     // Update in-memory progress and persist to SQL storage
     if (this.userProgress.has(userId)) {
@@ -117,7 +163,11 @@ export class ProgressRoom extends DurableObject<Env> {
       }
 
       try {
-        socket.send(JSON.stringify({ userId, progress }));
+        socket.send(JSON.stringify({
+          userId,
+          progress,
+          profile: this.userProfiles.get(userId) ?? null,
+        }));
       } catch (error) {
         this.users.delete(observerUserId);
         console.error('Error sending progress update:', error);

@@ -6,6 +6,7 @@ import './App.css'
 import { discordSessionPromise, type DiscordSession } from './discord'
 import {
   buildCards,
+  buildCardsForSolvedCategories,
   categoryColors,
   formatPuzzleDate,
   getVictoryMessage,
@@ -23,8 +24,10 @@ import {
   createProgressGuessMessage,
   getProgressWebSocketUrl,
   parseProgressMessage,
+  type GameCategory,
   type GameData,
   type PlayerGuess,
+  type PlayerProfile,
   type PlayerProgress,
 } from './lib'
 
@@ -47,7 +50,8 @@ const CARD_SHAKE_X = [-7, 7, -6, 5]
 const TOAST_ANIMATION_SECONDS = 0.18
 const SOLVED_GROUP_ENTER_Y = 10
 const TITLE_ENTER_Y = 10
-const MAX_PROGRESS_PLAYERS = 6
+const MIN_PROGRESS_ROWS = 4
+const MAX_PROGRESS_ROWS = 7
 
 type GuessAnimation = 'correct' | 'incorrect'
 type GuessPhase = 'idle' | 'jump' | 'shake' | 'swap'
@@ -56,6 +60,7 @@ type LayoutPhase = 'idle' | 'swap' | 'instant'
 interface ObservedProgress {
   userId: string
   progress: PlayerProgress
+  profile: PlayerProfile | null
   updatedAt: number
 }
 
@@ -92,37 +97,63 @@ function upsertObservedProgress(
   currentPlayers: ObservedProgress[],
   userId: string,
   progress: PlayerProgress,
+  profile: PlayerProfile | null = null,
 ) {
-  const updatedPlayer = { userId, progress, updatedAt: Date.now() }
+  const previousPlayer = currentPlayers.find((player) => player.userId === userId)
+  const updatedPlayer = {
+    userId,
+    progress,
+    profile: profile ?? previousPlayer?.profile ?? null,
+    updatedAt: Date.now(),
+  }
 
   return [
     updatedPlayer,
     ...currentPlayers.filter((player) => player.userId !== userId),
   ]
     .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, MAX_PROGRESS_PLAYERS)
 }
 
 function upsertObservedProgressBatch(
   currentPlayers: ObservedProgress[],
-  updates: Array<{ userId: string; progress: PlayerProgress }>,
+  updates: Array<{ userId: string; progress: PlayerProgress; profile?: PlayerProfile | null }>,
 ) {
   return updates.reduce(
-    (players, update) => upsertObservedProgress(players, update.userId, update.progress),
+    (players, update) => upsertObservedProgress(players, update.userId, update.progress, update.profile ?? null),
     currentPlayers,
   )
+}
+
+function getDiscordAvatarUrl(user: DiscordSession['user']) {
+  if (!user.avatar) {
+    return null
+  }
+
+  return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=80`
+}
+
+function getDiscordProfile(user: DiscordSession['user']): PlayerProfile {
+  return {
+    displayName: user.global_name || user.username,
+    avatarUrl: getDiscordAvatarUrl(user),
+  }
 }
 
 function getShortUserId(userId: string) {
   return userId.length > 4 ? userId.slice(-4) : userId
 }
 
-function getProgressPlayerName(userId: string) {
-  return `Player ${getShortUserId(userId)}`
+function getProgressPlayerName(player: ProgressPlayer) {
+  return player.profile?.displayName || `Player ${getShortUserId(player.userId)}`
 }
 
-function getProgressInitial(userId: string) {
-  return getShortUserId(userId).slice(0, 2).toUpperCase() || '?'
+function getProgressInitial(player: ProgressPlayer) {
+  const name = player.profile?.displayName
+  if (name) {
+    return name.trim().charAt(0).toUpperCase() || '?'
+  }
+
+  return getShortUserId(player.userId).slice(0, 2).toUpperCase() || '?'
 }
 
 function getProgressResult(player: ProgressSummary) {
@@ -139,6 +170,51 @@ function getProgressResult(player: ProgressSummary) {
   }
 
   return `${player.mistakesMade} miss${player.mistakesMade === 1 ? '' : 'es'}`
+}
+
+function getCategoryIndexByPosition(categories: GameCategory[], position: number) {
+  for (let categoryIndex = 0; categoryIndex < categories.length; categoryIndex += 1) {
+    if (categories[categoryIndex].cards.some((card) => card.position === position)) {
+      return categoryIndex
+    }
+  }
+
+  return null
+}
+
+function getProgressRows(player: ProgressPlayer, categories: GameCategory[]) {
+  const rowCount = Math.min(MAX_PROGRESS_ROWS, Math.max(MIN_PROGRESS_ROWS, player.progress.length))
+  const hasFinished = player.isWon || player.isGameOver
+
+  return Array.from({ length: rowCount }).map((_, rowIndex) => {
+    const guess = player.progress[rowIndex]
+
+    if (!guess) {
+      return Array.from({ length: 4 }).map((__, cellIndex) => ({
+        key: `${rowIndex}-${cellIndex}`,
+        className: 'progress-grid-cell blank',
+      }))
+    }
+
+    const guessedCategories = guess.map((position) => getCategoryIndexByPosition(categories, position))
+    const firstCategory = guessedCategories[0]
+    const isCorrect = firstCategory !== null && guessedCategories.every((categoryIndex) => categoryIndex === firstCategory)
+
+    return guessedCategories.map((categoryIndex, cellIndex) => {
+      const shouldRevealCategory = isCorrect || hasFinished
+      const colorClass = categoryIndex !== null && shouldRevealCategory ? ` ${categoryColors[categoryIndex]}` : ''
+      const stateClass = isCorrect
+        ? ' correct'
+        : hasFinished
+          ? ' revealed'
+          : ' hidden'
+
+      return {
+        key: `${rowIndex}-${cellIndex}`,
+        className: `progress-grid-cell${stateClass}${colorClass}`,
+      }
+    })
+  })
 }
 
 function App() {
@@ -160,12 +236,17 @@ function App() {
     connectionKey: null,
     players: [],
   })
+  const [ownSnapshotProgress, setOwnSnapshotProgress] = useState<{
+    connectionKey: string
+    progress: PlayerProgress
+  } | null>(null)
   const [openProgressConnectionKey, setOpenProgressConnectionKey] = useState<string | null>(null)
   const animationTimers = useRef<number[]>([])
   const toastTimer = useRef<number | null>(null)
   const progressSocket = useRef<WebSocket | null>(null)
   const pendingProgressGuesses = useRef<PlayerGuess[]>([])
   const hasReportedFinalGuess = useRef(false)
+  const hydratedProgressKey = useRef<string | null>(null)
   const puzzleDate = useMemo(() => formatPuzzleDate(new Date()), [])
   const progressConnectionKey = discordSession?.guildId && discordSession.user.id
     ? `${discordSession.guildId}:${discordSession.user.id}:${puzzleDate}`
@@ -277,19 +358,26 @@ function App() {
         return
       }
 
+      if (message.type === 'snapshot') {
+        const ownProgress = message.players.find((player) => player.userId === userId)?.progress
+        if (ownProgress) {
+          setOwnSnapshotProgress({ connectionKey, progress: ownProgress })
+        }
+      }
+
       setProgressState((currentState) => ({
         connectionKey,
         players: message.type === 'snapshot'
-          ? upsertObservedProgressBatch(
-              [],
-              message.players.filter((player) => player.userId !== userId),
-            )
+          ? upsertObservedProgressBatch([], message.players)
           : message.player.userId === userId
-            ? currentState.connectionKey === connectionKey ? currentState.players : []
+            ? currentState.connectionKey === connectionKey
+              ? currentState.players
+              : []
             : upsertObservedProgress(
                 currentState.connectionKey === connectionKey ? currentState.players : [],
                 message.player.userId,
                 message.player.progress,
+                message.player.profile ?? null,
               ),
       }))
     })
@@ -352,9 +440,38 @@ function App() {
 
     return progressState.players.map((player) => ({
       ...player,
+      profile: player.profile ?? (
+        player.userId === discordSession?.user.id ? getDiscordProfile(discordSession.user) : null
+      ),
       ...summarizeProgress(player.progress, data.categories),
     }))
-  }, [data, progressConnectionKey, progressState])
+  }, [data, discordSession, progressConnectionKey, progressState])
+
+  useEffect(() => {
+    if (!data || !ownSnapshotProgress || ownSnapshotProgress.connectionKey !== progressConnectionKey) {
+      return
+    }
+
+    if (ownSnapshotProgress.progress.length === 0 || hydratedProgressKey.current === progressConnectionKey) {
+      return
+    }
+
+    const summary = summarizeProgress(ownSnapshotProgress.progress, data.categories)
+
+    hydratedProgressKey.current = progressConnectionKey
+    hasReportedFinalGuess.current = summary.isWon || summary.isGameOver
+    setHasStarted(true)
+    setSelectedIds([])
+    setSolvedCategories(summary.solvedCategories)
+    setBoardCards(buildCardsForSolvedCategories(data.categories, summary.solvedCategories))
+    setMistakesRemaining(MAX_MISTAKES - summary.mistakesMade)
+    setIsGameOver(summary.isGameOver)
+    setGuessAnimation(null)
+    setGuessPhase('idle')
+    setLayoutPhase('idle')
+    setActiveGuessIds([])
+    setToast(null)
+  }, [data, ownSnapshotProgress, progressConnectionKey])
 
   function queueAnimation(callback: () => void, delay: number) {
     const timer = window.setTimeout(() => {
@@ -376,11 +493,33 @@ function App() {
     }, TOAST_MS)
   }
 
+  function recordOwnProgressGuess(guess: PlayerGuess) {
+    if (!discordSession || !progressConnectionKey) {
+      return
+    }
+
+    setProgressState((currentState) => {
+      const currentPlayers = currentState.connectionKey === progressConnectionKey ? currentState.players : []
+      const currentProgress = currentPlayers.find((player) => player.userId === discordSession.user.id)?.progress ?? []
+
+      return {
+        connectionKey: progressConnectionKey,
+        players: upsertObservedProgress(
+          currentPlayers,
+          discordSession.user.id,
+          [...currentProgress, guess],
+          getDiscordProfile(discordSession.user),
+        ),
+      }
+    })
+  }
+
   function queueProgressGuess(guess: PlayerGuess, isFinalGuess: boolean) {
     if (!discordSession?.guildId || hasReportedFinalGuess.current) {
       return
     }
 
+    recordOwnProgressGuess(guess)
     pendingProgressGuesses.current.push(guess)
 
     if (progressSocket.current?.readyState === WebSocket.OPEN) {
@@ -510,23 +649,6 @@ function App() {
     }, GUESS_JUMP_ANIMATION_MS + INCORRECT_SHAKE_ANIMATION_MS + INCORRECT_CLEAR_BUFFER_MS)
   }
 
-  function resetPuzzle() {
-    if (!data) {
-      return
-    }
-
-    setSelectedIds([])
-    setSolvedCategories([])
-    setBoardCards(buildCards(data.categories))
-    setMistakesRemaining(MAX_MISTAKES)
-    setIsGameOver(false)
-    setGuessAnimation(null)
-    setGuessPhase('idle')
-    setLayoutPhase('idle')
-    setActiveGuessIds([])
-    setToast(null)
-  }
-
   if (error) {
     return <StatusScreen message={error} />
   }
@@ -540,26 +662,27 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell game-shell${discordSession?.guildId ? '' : ' no-progress'}`}>
       {discordSession?.guildId ? (
         <ProgressPanel
-          categoryCount={data.categories.length}
+          categories={data.categories}
           isConnected={isProgressSocketOpen}
           players={displayedProgressPlayers}
         />
       ) : null}
 
-      <header className="game-header">
-        <div className="brand">
-          <img className="app-logo" src={connectionsLogo} alt="" />
-          <h1>Connections</h1>
-        </div>
-      </header>
+      <div className="game-column">
+        <header className="game-header">
+          <div className="brand">
+            <img className="app-logo" src={connectionsLogo} alt="" />
+            <h1>Connections</h1>
+          </div>
+        </header>
 
-      <section className="game-area" aria-label="Connections puzzle">
-        <p className="game-instruction">Create four groups of four!</p>
-        <div className="board-frame">
-          <div className="board-surface">
+        <section className="game-area" aria-label="Connections puzzle">
+          <p className="game-instruction">Create four groups of four!</p>
+          <div className="board-frame">
+            <div className="board-surface">
             <motion.div
               layout
               className="board-grid"
@@ -646,22 +769,21 @@ function App() {
                 </motion.div>
               ) : null}
             </AnimatePresence>
+            </div>
           </div>
-        </div>
 
-        <MistakeMeter mistakesRemaining={mistakesRemaining} />
+          <MistakeMeter mistakesRemaining={mistakesRemaining} />
 
-        <GameActions
-          canDeselect={selectedIds.length > 0 && !guessAnimation}
-          canReset={isGameOver || isWon}
-          canShuffle={!isGameOver && !isWon && !guessAnimation}
-          canSubmit={canSubmit}
-          onDeselectAll={deselectAll}
-          onReset={resetPuzzle}
-          onShuffle={shuffleBoard}
-          onSubmit={submitSelection}
-        />
-      </section>
+          <GameActions
+            canDeselect={selectedIds.length > 0 && !guessAnimation}
+            canShuffle={!isGameOver && !isWon && !guessAnimation}
+            canSubmit={canSubmit}
+            onDeselectAll={deselectAll}
+            onShuffle={shuffleBoard}
+            onSubmit={submitSelection}
+          />
+        </section>
+      </div>
     </main>
   )
 }
@@ -698,11 +820,11 @@ function TitleScreen({ data, onPlay }: { data: GameData; onPlay: () => void }) {
 }
 
 function ProgressPanel({
-  categoryCount,
+  categories,
   isConnected,
   players,
 }: {
-  categoryCount: number
+  categories: GameCategory[]
   isConnected: boolean
   players: ProgressPlayer[]
 }) {
@@ -716,12 +838,17 @@ function ProgressPanel({
         <div className="progress-player-list">
           {players.map((player) => {
             const result = getProgressResult(player)
-            const playerName = getProgressPlayerName(player.userId)
+            const playerName = getProgressPlayerName(player)
+            const rows = getProgressRows(player, categories)
 
             return (
               <div className="progress-player" key={player.userId}>
                 <div className="progress-avatar" aria-hidden="true">
-                  <span>{getProgressInitial(player.userId)}</span>
+                  {player.profile?.avatarUrl ? (
+                    <img src={player.profile.avatarUrl} alt="" />
+                  ) : (
+                    <span>{getProgressInitial(player)}</span>
+                  )}
                 </div>
                 <div className="progress-details">
                   <div className="progress-name-row">
@@ -731,16 +858,11 @@ function ProgressPanel({
                     ) : null}
                   </div>
                   <div
-                    className="progress-mini-board"
-                    aria-label={`${player.solvedCategories.length} groups solved, ${player.mistakesMade} mistakes`}
+                    className="progress-grid"
+                    aria-label={`${player.progress.length} guesses, ${player.solvedCategories.length} groups solved`}
                   >
-                    {Array.from({ length: categoryCount }).map((_, index) => (
-                      <span
-                        className={`progress-mini-cell${
-                          player.solvedCategories.includes(index) ? ` solved ${categoryColors[index]}` : ''
-                        }`}
-                        key={index}
-                      />
+                    {rows.flat().map((cell) => (
+                      <span className={cell.className} key={cell.key} />
                     ))}
                   </div>
                 </div>
@@ -773,20 +895,16 @@ function MistakeMeter({ mistakesRemaining }: { mistakesRemaining: number }) {
 
 function GameActions({
   canDeselect,
-  canReset,
   canShuffle,
   canSubmit,
   onDeselectAll,
-  onReset,
   onShuffle,
   onSubmit,
 }: {
   canDeselect: boolean
-  canReset: boolean
   canShuffle: boolean
   canSubmit: boolean
   onDeselectAll: () => void
-  onReset: () => void
   onShuffle: () => void
   onSubmit: () => void
 }) {
@@ -801,11 +919,6 @@ function GameActions({
       <button className="primary-action" type="button" onClick={onSubmit} disabled={!canSubmit}>
         Submit
       </button>
-      {canReset ? (
-        <button type="button" onClick={onReset}>
-          Try again
-        </button>
-      ) : null}
     </div>
   )
 }

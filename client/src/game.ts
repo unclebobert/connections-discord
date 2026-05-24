@@ -106,6 +106,19 @@ export function swapCategoryCardsToTopRow(
   return reorderedCards
 }
 
+export function buildCardsForSolvedCategories(categories: GameCategory[], solvedCategories: number[]) {
+  return solvedCategories.reduce(
+    (cards, categoryIndex, solvedIndex) =>
+      swapCategoryCardsToTopRow(
+        cards,
+        categories[categoryIndex],
+        categoryIndex,
+        solvedCategories.slice(0, solvedIndex),
+      ),
+    buildCards(categories),
+  )
+}
+
 export function isOneAway(cards: PlayCard[]) {
   const counts = cards.reduce<Record<number, number>>((accumulator, card) => {
     accumulator[card.categoryIndex] = (accumulator[card.categoryIndex] ?? 0) + 1

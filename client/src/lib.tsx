@@ -21,6 +21,11 @@ export const API_BASE_URL = import.meta.env.DEV ?
 export type PlayerGuess = [number, number, number, number]
 export type PlayerProgress = PlayerGuess[]
 
+export interface PlayerProfile {
+  displayName: string
+  avatarUrl: string | null
+}
+
 export interface ProgressGuessMessage {
   userId: string
   guess: PlayerGuess
@@ -29,6 +34,7 @@ export interface ProgressGuessMessage {
 export interface ProgressUpdateMessage {
   userId: string
   progress: PlayerProgress
+  profile?: PlayerProfile | null
 }
 
 export type ProgressMessage =
@@ -103,7 +109,14 @@ function isPlayerProgress(value: unknown): value is PlayerProgress {
 function isProgressUpdateMessage(value: unknown): value is ProgressUpdateMessage {
   return isRecord(value) &&
     typeof value.userId === 'string' &&
-    isPlayerProgress(value.progress)
+    isPlayerProgress(value.progress) &&
+    (value.profile === undefined || value.profile === null || isPlayerProfile(value.profile))
+}
+
+function isPlayerProfile(value: unknown): value is PlayerProfile {
+  return isRecord(value) &&
+    typeof value.displayName === 'string' &&
+    (typeof value.avatarUrl === 'string' || value.avatarUrl === null)
 }
 
 function isPlayerGuess(value: unknown): value is PlayerGuess {
