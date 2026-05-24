@@ -8,9 +8,11 @@ export interface DiscordSession {
   user: DiscordAuth['user']
 }
 
+const DISCORD_CLIENT_ID = import.meta.env.VITE_DISCORD_CLIENT_ID
+
 const discordSDK = import.meta.env.DEV ?
   null :
-  new DiscordSDK(import.meta.env.VITE_CLIENT_ID)
+  new DiscordSDK(DISCORD_CLIENT_ID)
 
 async function setupDiscordSDK(): Promise<DiscordSession | null> {
   if (!discordSDK) {
@@ -21,7 +23,7 @@ async function setupDiscordSDK(): Promise<DiscordSession | null> {
   console.log('Discord SDK is ready!')
 
   const { code } = await discordSDK.commands.authorize({
-    client_id: import.meta.env.VITE_DISCORD_CLIENT_ID,
+    client_id: DISCORD_CLIENT_ID,
     response_type: 'code',
     state: '',
     prompt: 'none',

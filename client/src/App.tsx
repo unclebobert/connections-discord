@@ -22,7 +22,7 @@ import {
   API_BASE_URL,
   createProgressGuessMessage,
   getProgressWebSocketUrl,
-  parseProgressUpdate,
+  parseProgressMessage,
   type GameData,
   type PlayerGuess,
   type PlayerProgress,
@@ -101,6 +101,16 @@ function upsertObservedProgress(
   ]
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, MAX_PROGRESS_PLAYERS)
+}
+
+function upsertObservedProgressBatch(
+  currentPlayers: ObservedProgress[],
+  updates: Array<{ userId: string; progress: PlayerProgress }>,
+) {
+  return updates.reduce(
+    (players, update) => upsertObservedProgress(players, update.userId, update.progress),
+    currentPlayers,
+  )
 }
 
 function getShortUserId(userId: string) {
@@ -261,19 +271,26 @@ function App() {
       setOpenProgressConnectionKey((currentKey) => currentKey === connectionKey ? null : currentKey)
     })
     socket.addEventListener('message', (event) => {
-      const message = parseProgressUpdate(String(event.data))
+      const message = parseProgressMessage(String(event.data))
 
-      if (!message || message.userId === userId) {
+      if (!message) {
         return
       }
 
       setProgressState((currentState) => ({
         connectionKey,
-        players: upsertObservedProgress(
-          currentState.connectionKey === connectionKey ? currentState.players : [],
-          message.userId,
-          message.progress,
-        ),
+        players: message.type === 'snapshot'
+          ? upsertObservedProgressBatch(
+              [],
+              message.players.filter((player) => player.userId !== userId),
+            )
+          : message.player.userId === userId
+            ? currentState.connectionKey === connectionKey ? currentState.players : []
+            : upsertObservedProgress(
+                currentState.connectionKey === connectionKey ? currentState.players : [],
+                message.player.userId,
+                message.player.progress,
+              ),
       }))
     })
 

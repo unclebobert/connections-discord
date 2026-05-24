@@ -31,6 +31,16 @@ export interface ProgressUpdateMessage {
   progress: PlayerProgress
 }
 
+export type ProgressMessage =
+  | {
+      type: 'snapshot'
+      players: ProgressUpdateMessage[]
+    }
+  | {
+      type: 'update'
+      player: ProgressUpdateMessage
+    }
+
 export function getProgressWebSocketUrl(
   guildId: string,
   date: string,
@@ -58,17 +68,24 @@ export function createProgressGuessMessage(userId: string, guess: PlayerGuess): 
   return { userId, guess }
 }
 
-export function parseProgressUpdate(data: string): ProgressUpdateMessage | null {
+export function parseProgressMessage(data: string): ProgressMessage | null {
   try {
     const parsed: unknown = JSON.parse(data)
 
-    if (!isRecord(parsed) || typeof parsed.userId !== 'string' || !isPlayerProgress(parsed.progress)) {
+    if (Array.isArray(parsed) && parsed.every(isProgressUpdateMessage)) {
+      return {
+        type: 'snapshot',
+        players: parsed,
+      }
+    }
+
+    if (!isProgressUpdateMessage(parsed)) {
       return null
     }
 
     return {
-      userId: parsed.userId,
-      progress: parsed.progress,
+      type: 'update',
+      player: parsed,
     }
   } catch {
     return null
@@ -81,6 +98,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isPlayerProgress(value: unknown): value is PlayerProgress {
   return Array.isArray(value) && value.every(isPlayerGuess)
+}
+
+function isProgressUpdateMessage(value: unknown): value is ProgressUpdateMessage {
+  return isRecord(value) &&
+    typeof value.userId === 'string' &&
+    isPlayerProgress(value.progress)
 }
 
 function isPlayerGuess(value: unknown): value is PlayerGuess {
