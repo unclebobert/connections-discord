@@ -30,7 +30,6 @@ async function setupDiscordSDK(): Promise<DiscordSession | null> {
     scope: [
       'identify',
       'guilds',
-      'applications.commands',
     ],
   })
 
