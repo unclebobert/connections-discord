@@ -4,7 +4,7 @@ import { ProgressRoom } from './session';
 
 type Bindings = {
   VITE_DISCORD_CLIENT_ID: string;
-  DISCORD_CLIENT_SECRET?: string;
+  DISCORD_CLIENT_SECRET: string;
   KV: KVNamespace;
   PROGRESS_ROOMS: DurableObjectNamespace<ProgressRoom>;
 };
