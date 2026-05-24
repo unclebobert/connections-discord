@@ -24,7 +24,7 @@ export class ProgressRoom extends DurableObject<Env> {
     const cursor = this.sql.exec(`
       CREATE TABLE IF NOT EXISTS progress (
         user_id TEXT NOT NULL PRIMARY KEY,
-        progress JSON NOT NULL,
+        progress JSON NOT NULL
       );
       SELECT * FROM progress;
     `)
@@ -51,31 +51,37 @@ export class ProgressRoom extends DurableObject<Env> {
     server.serializeAttachment(userId);
     this.users.set(userId, server);
 
+    // send initial progress of all users to the newly connected client
+    const usersProgress: Record<string, PlayerProgress> = {};
+    for (const [userId, progress] of this.userProgress.entries()) {
+      usersProgress[userId] = progress;
+    }
+    server.send(JSON.stringify(usersProgress));
+
     return client;
   }
   
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     // listen for updates and push them to all connected clients
     if (message instanceof ArrayBuffer) {
-      throw new Error('Binary messages are not supported');
+      console.error('Binary messages are not supported');
+      return;
     }
     try {
       const { userId, guess } = JSON.parse(message);
-      const cursor = this.sql.exec(`
-        SELECT * FROM progress
-        WHERE user_id = ?
-      `, [userId]);
-      const progress: PlayerProgress = JSON.parse(cursor.toArray()[0].progress as string);
-      progress.push(guess);
-      this.pushProgressUpdate(userId, progress);
+      this.saveGuess(userId, guess);
     } catch (error) {
-      console.error('Error parsing progress update:', error);
+      console.error('Error parsing guess:', error);
     }
   }
 
-  async pushProgressUpdate(userId: string, progress: PlayerProgress) {
+  async saveGuess(userId: string, progress: PlayerGuess) {
     // Update in-memory progress and persist to SQL storage
-    this.userProgress.set(userId, progress);
+    if (this.userProgress.has(userId)) {
+      this.userProgress.get(userId)?.push(progress);
+    } else {
+      this.userProgress.set(userId, [progress]);
+    }
     this.sql.exec(`
       INSERT INTO progress (user_id, progress)
       VALUES (?, ?)
