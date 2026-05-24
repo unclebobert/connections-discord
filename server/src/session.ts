@@ -73,7 +73,33 @@ export class ProgressRoom extends DurableObject<Env> {
     }
   }
 
-  async join(userId: string, profile: PlayerProfile) {
+  async fetch(request: Request) {
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (!upgradeHeader || upgradeHeader !== 'websocket') {
+      return new Response('ProgressRoom expected Upgrade: websocket', {
+        status: 426,
+      });
+    }
+
+    const userId = request.headers.get('x-progress-user-id');
+    const encodedProfile = request.headers.get('x-progress-profile');
+    if (!userId || !encodedProfile) {
+      return new Response('Missing authenticated progress user', {
+        status: 401,
+      });
+    }
+
+    try {
+      return this.join(userId, JSON.parse(decodeURIComponent(encodedProfile)) as PlayerProfile);
+    } catch (error) {
+      console.error('Error opening progress socket:', error);
+      return new Response('Invalid progress user metadata', {
+        status: 400,
+      });
+    }
+  }
+
+  join(userId: string, profile: PlayerProfile) {
     const existingSocket = this.users.get(userId);
     if (existingSocket && existingSocket.readyState === WebSocket.OPEN) {
       existingSocket.close(1000, 'New connection established');
@@ -97,7 +123,10 @@ export class ProgressRoom extends DurableObject<Env> {
       }));
     server.send(JSON.stringify(usersProgress));
 
-    return client;
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
   }
   
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {

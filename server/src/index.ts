@@ -83,11 +83,11 @@ app.get('/ws/:guildId/:date/:userId', async (c) => {
 
   const room = c.env.PROGRESS_ROOMS.getByName(`${guildId}:${date}`);
 
-  const clientWebSocket = await room.join(userId, authResult.profile);
-  return c.newResponse(null, {
-    status: 101,
-    webSocket: clientWebSocket as unknown as WebSocket,
-  });
+  const headers = new Headers(c.req.raw.headers);
+  headers.set('x-progress-user-id', userId);
+  headers.set('x-progress-profile', encodeURIComponent(JSON.stringify(authResult.profile)));
+
+  return room.fetch(new Request(c.req.raw, { headers }));
 });
 
 async function validateDiscordAccess(
