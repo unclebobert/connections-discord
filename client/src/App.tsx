@@ -4,9 +4,30 @@ import connectionsLogo from './assets/connections.svg'
 import './App.css'
 
 import { discordSessionPromise, type DiscordSession } from './discord'
-import { type GameCategory, type PlayCard, type GameData, API_BASE_URL, getProgressWebSocketUrl } from './lib'
+import {
+  buildCards,
+  categoryColors,
+  formatPuzzleDate,
+  getVictoryMessage,
+  isOneAway,
+  MAX_MISTAKES,
+  shuffleCards,
+  summarizeProgress,
+  swapCategoryCardsToTopRow,
+  toPlayerGuess,
+  type PlayCard,
+  type ProgressSummary,
+} from './game'
+import {
+  API_BASE_URL,
+  createProgressGuessMessage,
+  getProgressWebSocketUrl,
+  parseProgressUpdate,
+  type GameData,
+  type PlayerGuess,
+  type PlayerProgress,
+} from './lib'
 
-const MAX_MISTAKES = 4
 const INCORRECT_SHAKE_ANIMATION_MS = 420
 const CORRECT_SWAP_ANIMATION_MS = 700
 const SOLVED_GROUP_REVEAL_DELAY_MS = 100
@@ -28,124 +49,86 @@ const SOLVED_GROUP_ENTER_Y = 10
 const TITLE_ENTER_Y = 10
 const MAX_PROGRESS_PLAYERS = 6
 
-interface PlayerProgress {
+type GuessAnimation = 'correct' | 'incorrect'
+type GuessPhase = 'idle' | 'jump' | 'shake' | 'swap'
+type LayoutPhase = 'idle' | 'swap' | 'instant'
+
+interface ObservedProgress {
   userId: string
-  username: string
-  avatarUrl: string | null
-  solvedCount: number
-  mistakesMade: number
-  completed: boolean
-  resultLabel: string | null
+  progress: PlayerProgress
   updatedAt: number
 }
 
-const categoryColors = [
-  'category-yellow',
-  'category-green',
-  'category-blue',
-  'category-purple',
-]
-
-function buildCards(categories: GameCategory[]) {
-  return categories
-    .flatMap((category, categoryIndex) =>
-      category.cards.map((card) => ({
-        ...card,
-        categoryIndex,
-        id: `${categoryIndex}-${card.position}-${card.content}`,
-      })),
-    )
-    .sort((a, b) => a.position - b.position)
+interface ProgressState {
+  connectionKey: string | null
+  players: ObservedProgress[]
 }
 
-function shuffleCards(cards: PlayCard[]) {
-  const shuffled = [...cards]
+type ProgressPlayer = ObservedProgress & ProgressSummary
 
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const randomIndex = Math.floor(Math.random() * (index + 1))
-    const current = shuffled[index]
-    shuffled[index] = shuffled[randomIndex]
-    shuffled[randomIndex] = current
-  }
-
-  return shuffled
-}
-
-function formatPuzzleDate(date: Date) {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-
-  return `${year}-${month}-${day}`
-}
-
-function getVictoryMessage(mistakesMade: number) {
-  if (mistakesMade === 0) {
-    return 'Perfect'
-  }
-
-  if (mistakesMade === 1) {
-    return 'Great'
-  }
-
-  if (mistakesMade === 2) {
-    return 'Solid'
-  }
-
-  return 'Phew'
-}
-
-function getCardId(categoryIndex: number, card: GameCategory['cards'][number]) {
-  return `${categoryIndex}-${card.position}-${card.content}`
-}
-
-function getDiscordAvatarUrl(user: DiscordSession['user']) {
-  if (!user.avatar) {
-    return null
-  }
-
-  return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`
-}
-
-function getDisplayName(user: DiscordSession['user']) {
-  return user.global_name || user.username
-}
-
-function getPlayerInitial(username: string) {
-  return username.trim().charAt(0).toUpperCase() || '?'
-}
-
-// Connections reveals a solved group only after its cards gather into the next
-// open row. We create that effect by swapping selected cards into the first four
-// unsolved slots while preserving the category's answer order.
-function swapCategoryCardsToTopRow(
-  cards: PlayCard[],
-  category: GameCategory,
-  categoryIndex: number,
-  solvedCategories: number[],
+function flushProgressQueue(
+  socket: WebSocket,
+  userId: string,
+  pendingGuesses: { current: PlayerGuess[] },
 ) {
-  const reorderedCards = [...cards]
-  const solvedSet = new Set(solvedCategories)
-  const unsolvedIndexes = reorderedCards
-    .map((card, index) => ({ card, index }))
-    .filter(({ card }) => !solvedSet.has(card.categoryIndex))
-    .map(({ index }) => index)
+  while (socket.readyState === WebSocket.OPEN && pendingGuesses.current.length > 0) {
+    const guess = pendingGuesses.current.shift()
 
-  category.cards.forEach((card, targetOffset) => {
-    const targetIndex = unsolvedIndexes[targetOffset]
-    const cardId = getCardId(categoryIndex, card)
-    const currentIndex = reorderedCards.findIndex((boardCard) => boardCard.id === cardId)
-
-    if (targetIndex === undefined || currentIndex === -1 || currentIndex === targetIndex) {
+    if (!guess) {
       return
     }
 
-    const targetCard = reorderedCards[targetIndex]
-    reorderedCards[targetIndex] = reorderedCards[currentIndex]
-    reorderedCards[currentIndex] = targetCard
-  })
+    try {
+      socket.send(JSON.stringify(createProgressGuessMessage(userId, guess)))
+    } catch (error) {
+      pendingGuesses.current.unshift(guess)
+      console.error('Unable to send progress update:', error)
+      return
+    }
+  }
+}
 
-  return reorderedCards
+function upsertObservedProgress(
+  currentPlayers: ObservedProgress[],
+  userId: string,
+  progress: PlayerProgress,
+) {
+  const updatedPlayer = { userId, progress, updatedAt: Date.now() }
+
+  return [
+    updatedPlayer,
+    ...currentPlayers.filter((player) => player.userId !== userId),
+  ]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, MAX_PROGRESS_PLAYERS)
+}
+
+function getShortUserId(userId: string) {
+  return userId.length > 4 ? userId.slice(-4) : userId
+}
+
+function getProgressPlayerName(userId: string) {
+  return `Player ${getShortUserId(userId)}`
+}
+
+function getProgressInitial(userId: string) {
+  return getShortUserId(userId).slice(0, 2).toUpperCase() || '?'
+}
+
+function getProgressResult(player: ProgressSummary) {
+  if (player.isWon) {
+    return getVictoryMessage(player.mistakesMade)
+  }
+
+  if (player.isGameOver) {
+    return 'Out'
+  }
+
+  if (player.mistakesMade === 0) {
+    return null
+  }
+
+  return `${player.mistakesMade} miss${player.mistakesMade === 1 ? '' : 'es'}`
 }
 
 function App() {
@@ -157,49 +140,68 @@ function App() {
   const [boardCards, setBoardCards] = useState<PlayCard[]>([])
   const [mistakesRemaining, setMistakesRemaining] = useState(MAX_MISTAKES)
   const [isGameOver, setIsGameOver] = useState(false)
-  const [guessAnimation, setGuessAnimation] = useState<'correct' | 'incorrect' | null>(null)
-  const [guessPhase, setGuessPhase] = useState<'idle' | 'jump' | 'shake' | 'swap'>('idle')
-  const [layoutPhase, setLayoutPhase] = useState<'idle' | 'swap' | 'instant'>('idle')
+  const [guessAnimation, setGuessAnimation] = useState<GuessAnimation | null>(null)
+  const [guessPhase, setGuessPhase] = useState<GuessPhase>('idle')
+  const [layoutPhase, setLayoutPhase] = useState<LayoutPhase>('idle')
   const [activeGuessIds, setActiveGuessIds] = useState<string[]>([])
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null)
   const [discordSession, setDiscordSession] = useState<DiscordSession | null>(null)
-  const [progressPlayers, setProgressPlayers] = useState<PlayerProgress[]>([])
-  const [isProgressSocketOpen, setIsProgressSocketOpen] = useState(false)
+  const [progressState, setProgressState] = useState<ProgressState>({
+    connectionKey: null,
+    players: [],
+  })
+  const [openProgressConnectionKey, setOpenProgressConnectionKey] = useState<string | null>(null)
   const animationTimers = useRef<number[]>([])
   const toastTimer = useRef<number | null>(null)
   const progressSocket = useRef<WebSocket | null>(null)
-  const reportedProgress = useRef<PlayerProgress | null>(null)
+  const pendingProgressGuesses = useRef<PlayerGuess[]>([])
+  const hasReportedFinalGuess = useRef(false)
   const puzzleDate = useMemo(() => formatPuzzleDate(new Date()), [])
+  const progressConnectionKey = discordSession?.guildId && discordSession.user.id
+    ? `${discordSession.guildId}:${discordSession.user.id}:${puzzleDate}`
+    : null
+  const isProgressSocketOpen = openProgressConnectionKey === progressConnectionKey
 
-  // Motion layout transitions are normally gentle, but we temporarily speed or
-  // disable them during the correct-guess swap/reveal sequence.
-  const layoutDuration = layoutPhase === 'instant'
-    ? 0
-    : layoutPhase === 'swap'
-      ? CORRECT_SWAP_ANIMATION_MS / 1000
-      : DEFAULT_LAYOUT_SECONDS
-  const layoutTransition = {
-    duration: layoutDuration,
+  const layoutTransition = useMemo(() => ({
+    duration: layoutPhase === 'instant'
+      ? 0
+      : layoutPhase === 'swap'
+        ? CORRECT_SWAP_ANIMATION_MS / 1000
+        : DEFAULT_LAYOUT_SECONDS,
     ease: layoutPhase === 'swap' ? CORRECT_SWAP_LAYOUT_EASE : DEFAULT_LAYOUT_EASE,
-  }
+  }), [layoutPhase])
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/connections/${puzzleDate}`)
-      .then((response) => {
+    const controller = new AbortController()
+
+    async function loadPuzzle() {
+      try {
+        const response = await fetch(`${API_BASE_URL}/connections/${puzzleDate}`, {
+          signal: controller.signal,
+        })
+
         if (!response.ok) {
           throw new Error('Unable to load today\'s puzzle.')
         }
 
-        return response.json()
-      })
-      .then((gameData: GameData) => {
+        const gameData = await response.json() as GameData
         setData(gameData)
         setBoardCards(buildCards(gameData.categories))
-      })
-      .catch((fetchError) => {
+      } catch (fetchError) {
+        if (controller.signal.aborted) {
+          return
+        }
+
         console.error('Error fetching data:', fetchError)
         setError('Could not load today\'s Connections puzzle.')
-      })
+      }
+    }
+
+    loadPuzzle()
+
+    return () => {
+      controller.abort()
+    }
   }, [puzzleDate])
 
   useEffect(() => {
@@ -220,19 +222,69 @@ function App() {
     }
   }, [])
 
+  useEffect(() => () => {
+    animationTimers.current.forEach((timer) => window.clearTimeout(timer))
+
+    if (toastTimer.current !== null) {
+      window.clearTimeout(toastTimer.current)
+    }
+
+    progressSocket.current?.close()
+  }, [])
+
   useEffect(() => {
-    const queuedAnimationTimers = animationTimers.current
+    const guildId = discordSession?.guildId
+    const userId = discordSession?.user.id
+    const accessToken = discordSession?.accessToken
+    const connectionKey = guildId && userId
+      ? `${guildId}:${userId}:${puzzleDate}`
+      : null
 
-    return () => {
-      queuedAnimationTimers.forEach((timer) => window.clearTimeout(timer))
+    pendingProgressGuesses.current = []
+    hasReportedFinalGuess.current = false
 
-      if (toastTimer.current) {
-        window.clearTimeout(toastTimer.current)
+    if (!guildId || !userId || !accessToken || !connectionKey) {
+      return
+    }
+
+    const socket = new WebSocket(getProgressWebSocketUrl(guildId, puzzleDate, userId, accessToken))
+    progressSocket.current = socket
+
+    socket.addEventListener('open', () => {
+      setOpenProgressConnectionKey(connectionKey)
+      flushProgressQueue(socket, userId, pendingProgressGuesses)
+    })
+    socket.addEventListener('close', () => {
+      setOpenProgressConnectionKey((currentKey) => currentKey === connectionKey ? null : currentKey)
+    })
+    socket.addEventListener('error', () => {
+      setOpenProgressConnectionKey((currentKey) => currentKey === connectionKey ? null : currentKey)
+    })
+    socket.addEventListener('message', (event) => {
+      const message = parseProgressUpdate(String(event.data))
+
+      if (!message || message.userId === userId) {
+        return
       }
 
-      progressSocket.current?.close()
+      setProgressState((currentState) => ({
+        connectionKey,
+        players: upsertObservedProgress(
+          currentState.connectionKey === connectionKey ? currentState.players : [],
+          message.userId,
+          message.progress,
+        ),
+      }))
+    })
+
+    return () => {
+      if (progressSocket.current === socket) {
+        progressSocket.current = null
+      }
+
+      socket.close()
     }
-  }, [])
+  }, [discordSession?.accessToken, discordSession?.guildId, discordSession?.user.id, puzzleDate])
 
   const selectedCards = useMemo(
     () => boardCards.filter((card) => selectedIds.includes(card.id)),
@@ -254,11 +306,11 @@ function App() {
     return solvedCategories
   }, [data, isGameOver, isWon, solvedCategories])
 
-  const unsolvedCards = boardCards.filter(
-    (card) => !visibleSolvedCategories.includes(card.categoryIndex),
+  const unsolvedCards = useMemo(
+    () => boardCards.filter((card) => !visibleSolvedCategories.includes(card.categoryIndex)),
+    [boardCards, visibleSolvedCategories],
   )
 
-  // The selected cards jump in their current board order, not in click order.
   const selectedJumpOrder = useMemo(() => {
     const selectedSet = new Set(selectedIds)
     const jumpOrder = new Map<string, number>()
@@ -272,105 +324,32 @@ function App() {
     return jumpOrder
   }, [selectedIds, unsolvedCards])
 
-  const currentPlayerProgress = useMemo<PlayerProgress | null>(() => {
-    if (!discordSession) {
-      return null
+  const displayedProgressPlayers = useMemo<ProgressPlayer[]>(() => {
+    if (!data) {
+      return []
     }
 
-    const hasCompleted = isWon || isGameOver
-    const mistakesMade = MAX_MISTAKES - mistakesRemaining
-
-    return {
-      userId: discordSession.user.id,
-      username: getDisplayName(discordSession.user),
-      avatarUrl: getDiscordAvatarUrl(discordSession.user),
-      solvedCount: solvedCategories.length,
-      mistakesMade,
-      completed: hasCompleted,
-      resultLabel: isWon ? getVictoryMessage(mistakesMade) : null,
-      updatedAt: 0,
-    }
-  }, [discordSession, isGameOver, isWon, mistakesRemaining, solvedCategories.length])
-
-  const displayedProgressPlayers = useMemo(
-    () => progressPlayers.slice(0, MAX_PROGRESS_PLAYERS),
-    [progressPlayers],
-  )
-
-  useEffect(() => {
-    if (!discordSession?.guildId) {
-      return
+    if (progressState.connectionKey !== progressConnectionKey) {
+      return []
     }
 
-    const socket = new WebSocket(getProgressWebSocketUrl(discordSession.guildId, puzzleDate))
-    progressSocket.current = socket
-
-    socket.addEventListener('open', () => {
-      setIsProgressSocketOpen(true)
-    })
-    socket.addEventListener('close', () => {
-      setIsProgressSocketOpen(false)
-    })
-    socket.addEventListener('error', () => {
-      setIsProgressSocketOpen(false)
-    })
-    socket.addEventListener('message', (event) => {
-      try {
-        const message = JSON.parse(String(event.data)) as {
-          type?: string
-          players?: PlayerProgress[]
-        }
-
-        if (message.type === 'progress:snapshot' && Array.isArray(message.players)) {
-          setProgressPlayers(message.players)
-        }
-      } catch (messageError) {
-        console.error('Unable to read progress update:', messageError)
-      }
-    })
-
-    return () => {
-      if (progressSocket.current === socket) {
-        progressSocket.current = null
-      }
-
-      socket.close()
-    }
-  }, [discordSession?.guildId, puzzleDate])
-
-  useEffect(() => {
-    const socket = progressSocket.current
-    if (!currentPlayerProgress || !isProgressSocketOpen || !socket) {
-      return
-    }
-
-    const previousProgress = reportedProgress.current
-    const nextProgress = previousProgress
-      ? {
-          ...currentPlayerProgress,
-          solvedCount: Math.max(previousProgress.solvedCount, currentPlayerProgress.solvedCount),
-          mistakesMade: Math.max(previousProgress.mistakesMade, currentPlayerProgress.mistakesMade),
-          completed: previousProgress.completed || currentPlayerProgress.completed,
-          resultLabel: previousProgress.completed
-            ? previousProgress.resultLabel
-            : currentPlayerProgress.resultLabel,
-        }
-      : currentPlayerProgress
-
-    reportedProgress.current = nextProgress
-    socket.send(JSON.stringify({
-      type: 'progress:update',
-      player: nextProgress,
+    return progressState.players.map((player) => ({
+      ...player,
+      ...summarizeProgress(player.progress, data.categories),
     }))
-  }, [currentPlayerProgress, isProgressSocketOpen])
+  }, [data, progressConnectionKey, progressState])
 
   function queueAnimation(callback: () => void, delay: number) {
-    const timer = window.setTimeout(callback, delay)
+    const timer = window.setTimeout(() => {
+      animationTimers.current = animationTimers.current.filter((queuedTimer) => queuedTimer !== timer)
+      callback()
+    }, delay)
+
     animationTimers.current.push(timer)
   }
 
   function showToast(text: string) {
-    if (toastTimer.current) {
+    if (toastTimer.current !== null) {
       window.clearTimeout(toastTimer.current)
     }
 
@@ -378,6 +357,22 @@ function App() {
     toastTimer.current = window.setTimeout(() => {
       setToast(null)
     }, TOAST_MS)
+  }
+
+  function queueProgressGuess(guess: PlayerGuess, isFinalGuess: boolean) {
+    if (!discordSession?.guildId || hasReportedFinalGuess.current) {
+      return
+    }
+
+    pendingProgressGuesses.current.push(guess)
+
+    if (progressSocket.current?.readyState === WebSocket.OPEN) {
+      flushProgressQueue(progressSocket.current, discordSession.user.id, pendingProgressGuesses)
+    }
+
+    if (isFinalGuess) {
+      hasReportedFinalGuess.current = true
+    }
   }
 
   function toggleCard(cardId: string) {
@@ -416,6 +411,12 @@ function App() {
       return
     }
 
+    const guess = toPlayerGuess(selectedCards)
+
+    if (!guess) {
+      return
+    }
+
     const submittedIds = selectedCards.map((card) => card.id)
     const categoryIndex = selectedCards[0].categoryIndex
     const isCorrect = selectedCards.every((card) => card.categoryIndex === categoryIndex)
@@ -423,6 +424,8 @@ function App() {
     if (isCorrect) {
       const nextSolvedCategories = [...solvedCategories, categoryIndex]
       const hasWon = nextSolvedCategories.length === data.categories.length
+
+      queueProgressGuess(guess, hasWon)
       setActiveGuessIds(submittedIds)
       setGuessAnimation('correct')
       setGuessPhase('jump')
@@ -443,8 +446,6 @@ function App() {
           ),
         )
 
-        // Once the selected cards have swapped into the top row, hold briefly
-        // before revealing the solved category without a second reflow slide.
         queueAnimation(() => {
           queueAnimation(() => {
             setLayoutPhase('instant')
@@ -464,25 +465,18 @@ function App() {
       return
     }
 
-    const counts = selectedCards.reduce<Record<number, number>>((accumulator, card) => {
-      accumulator[card.categoryIndex] = (accumulator[card.categoryIndex] ?? 0) + 1
-      return accumulator
-    }, {})
-    const wasOneAway = Object.values(counts).some((count) => count === 3)
     const nextMistakesRemaining = mistakesRemaining - 1
 
+    queueProgressGuess(guess, nextMistakesRemaining === 0)
     setMistakesRemaining(nextMistakesRemaining)
     setActiveGuessIds(submittedIds)
     setGuessAnimation('incorrect')
     setGuessPhase('jump')
 
-    if (wasOneAway) {
+    if (isOneAway(selectedCards)) {
       showToast('One away...')
     }
 
-    // Incorrect guesses jump first, then only the picked cards shake. Keeping
-    // these as separate phases prevents interrupted x/y animations from leaving
-    // cards visually offset.
     queueAnimation(() => {
       setGuessPhase('shake')
     }, GUESS_JUMP_ANIMATION_MS)
@@ -517,91 +511,25 @@ function App() {
   }
 
   if (error) {
-    return (
-      <main className="app-shell app-state">
-        <img className="app-logo" src={connectionsLogo} alt="" />
-        <h1>Connections</h1>
-        <p>{error}</p>
-      </main>
-    )
+    return <StatusScreen message={error} />
   }
 
   if (!data) {
-    return (
-      <main className="app-shell app-state">
-        <img className="app-logo" src={connectionsLogo} alt="" />
-        <h1>Connections</h1>
-        <p>Loading today&apos;s puzzle...</p>
-      </main>
-    )
+    return <StatusScreen message="Loading today's puzzle..." />
   }
 
   if (!hasStarted) {
-    return (
-      <motion.main
-        className="app-shell title-screen"
-        initial={{ opacity: 0, y: TITLE_ENTER_Y }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: TITLE_ENTER_SECONDS }}
-      >
-        <img className="title-logo" src={connectionsLogo} alt="" />
-        <h1>Connections</h1>
-        <div className="title-meta" aria-label="Puzzle details">
-          <span>{data.print_date}</span>
-          <span>By {data.editor}</span>
-        </div>
-        <button className="title-start" type="button" onClick={() => setHasStarted(true)}>
-          Play
-        </button>
-      </motion.main>
-    )
+    return <TitleScreen data={data} onPlay={() => setHasStarted(true)} />
   }
 
   return (
     <main className="app-shell">
       {discordSession?.guildId ? (
-        <aside className="progress-panel" aria-label="Guild progress">
-          <div className="progress-panel-title">
-            <span>Guild progress</span>
-            <span className={`progress-status${isProgressSocketOpen ? ' connected' : ''}`} />
-          </div>
-          {displayedProgressPlayers.length > 0 ? (
-            <div className="progress-player-list">
-              {displayedProgressPlayers.map((player) => (
-                <div
-                  className={`progress-player${player.userId === discordSession.user.id ? ' current' : ''}`}
-                  key={player.userId}
-                >
-                  <div className="progress-avatar" aria-hidden="true">
-                    {player.avatarUrl ? (
-                      <img src={player.avatarUrl} alt="" />
-                    ) : (
-                      <span>{getPlayerInitial(player.username)}</span>
-                    )}
-                  </div>
-                  <div className="progress-details">
-                    <div className="progress-name-row">
-                      <span className="progress-name">{player.username}</span>
-                      {player.resultLabel ? (
-                        <span className="progress-result">{player.resultLabel}</span>
-                      ) : null}
-                    </div>
-                    <div className="progress-mini-board" aria-label={`${player.solvedCount} groups solved`}>
-                      {Array.from({ length: data.categories.length }).map((_, index) => (
-                        <span
-                          className={`progress-mini-cell${index < player.solvedCount ? ` solved ${categoryColors[index]}` : ''}`}
-                          key={index}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="progress-empty">No progress yet</p>
-          )}
-        </aside>
+        <ProgressPanel
+          categoryCount={data.categories.length}
+          isConnected={isProgressSocketOpen}
+          players={displayedProgressPlayers}
+        />
       ) : null}
 
       <header className="game-header">
@@ -634,7 +562,6 @@ function App() {
                     exit={{ opacity: 1, y: 0 }}
                     transition={layoutTransition}
                   >
-                    {/* Keep layout movement and bounce transforms separate so Motion does not swallow the CSS scale animation. */}
                     <div className={`solved-group ${categoryColors[categoryIndex]}`}>
                       <h2>{category.title}</h2>
                       <p>{category.cards.map((card) => card.content).join(', ')}</p>
@@ -650,7 +577,6 @@ function App() {
                   const isShakingSelection = guessPhase === 'shake' && guessAnimation === 'incorrect' && isSelected
                   const jumpOrder = selectedJumpOrder.get(card.id) ?? 0
                   const jumpDelay = (jumpOrder * GUESS_JUMP_STAGGER_MS) / 1000
-                  const exitAnimation = { opacity: 0, transition: { duration: 0 } }
 
                   return (
                     <motion.button
@@ -666,7 +592,7 @@ function App() {
                         y: isJumpingSelection ? [0, CARD_JUMP_Y, 0] : 0,
                         x: isShakingSelection ? [0, ...CARD_SHAKE_X, 0] : 0,
                       }}
-                      exit={exitAnimation}
+                      exit={{ opacity: 0, transition: { duration: 0 } }}
                       transition={{
                         layout: layoutTransition,
                         y: {
@@ -691,7 +617,7 @@ function App() {
               {toast ? (
                 <motion.div
                   className="board-popup"
-                  key={toast?.id}
+                  key={toast.id}
                   role="status"
                   aria-live="polite"
                   initial={{ opacity: 0 }}
@@ -699,43 +625,171 @@ function App() {
                   exit={{ opacity: 0 }}
                   transition={{ duration: TOAST_ANIMATION_SECONDS, ease: 'easeOut' }}
                 >
-                  {toast?.text}
+                  {toast.text}
                 </motion.div>
               ) : null}
             </AnimatePresence>
           </div>
         </div>
 
-        <div className="mistakes" aria-label={`${mistakesRemaining} mistakes remaining`}>
-          <span>Mistakes remaining:</span>
-          {Array.from({ length: MAX_MISTAKES }).map((_, index) => (
-            <motion.span
-              className={`mistake-dot${index < mistakesRemaining ? '' : ' spent'}`}
-              key={index}
-              animate={{ opacity: index < mistakesRemaining ? 1 : 0.45 }}
-              transition={{ duration: TOAST_ANIMATION_SECONDS }}
-            />
-          ))}
-        </div>
+        <MistakeMeter mistakesRemaining={mistakesRemaining} />
 
-        <div className="actions">
-          <button type="button" onClick={shuffleBoard} disabled={isGameOver || isWon || !!guessAnimation}>
-            Shuffle
-          </button>
-          <button type="button" onClick={deselectAll} disabled={selectedIds.length === 0 || !!guessAnimation}>
-            Deselect all
-          </button>
-          <button className="primary-action" type="button" onClick={submitSelection} disabled={!canSubmit}>
-            Submit
-          </button>
-          {(isGameOver || isWon) ? (
-            <button type="button" onClick={resetPuzzle}>
-              Try again
-            </button>
-          ) : null}
-        </div>
+        <GameActions
+          canDeselect={selectedIds.length > 0 && !guessAnimation}
+          canReset={isGameOver || isWon}
+          canShuffle={!isGameOver && !isWon && !guessAnimation}
+          canSubmit={canSubmit}
+          onDeselectAll={deselectAll}
+          onReset={resetPuzzle}
+          onShuffle={shuffleBoard}
+          onSubmit={submitSelection}
+        />
       </section>
     </main>
+  )
+}
+
+function StatusScreen({ message }: { message: string }) {
+  return (
+    <main className="app-shell app-state">
+      <img className="app-logo" src={connectionsLogo} alt="" />
+      <h1>Connections</h1>
+      <p>{message}</p>
+    </main>
+  )
+}
+
+function TitleScreen({ data, onPlay }: { data: GameData; onPlay: () => void }) {
+  return (
+    <motion.main
+      className="app-shell title-screen"
+      initial={{ opacity: 0, y: TITLE_ENTER_Y }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: TITLE_ENTER_SECONDS }}
+    >
+      <img className="title-logo" src={connectionsLogo} alt="" />
+      <h1>Connections</h1>
+      <div className="title-meta" aria-label="Puzzle details">
+        <span>{data.print_date}</span>
+        <span>By {data.editor}</span>
+      </div>
+      <button className="title-start" type="button" onClick={onPlay}>
+        Play
+      </button>
+    </motion.main>
+  )
+}
+
+function ProgressPanel({
+  categoryCount,
+  isConnected,
+  players,
+}: {
+  categoryCount: number
+  isConnected: boolean
+  players: ProgressPlayer[]
+}) {
+  return (
+    <aside className="progress-panel" aria-label="Guild progress">
+      <div className="progress-panel-title">
+        <span>Guild progress</span>
+        <span className={`progress-status${isConnected ? ' connected' : ''}`} />
+      </div>
+      {players.length > 0 ? (
+        <div className="progress-player-list">
+          {players.map((player) => {
+            const result = getProgressResult(player)
+            const playerName = getProgressPlayerName(player.userId)
+
+            return (
+              <div className="progress-player" key={player.userId}>
+                <div className="progress-avatar" aria-hidden="true">
+                  <span>{getProgressInitial(player.userId)}</span>
+                </div>
+                <div className="progress-details">
+                  <div className="progress-name-row">
+                    <span className="progress-name">{playerName}</span>
+                    {result ? (
+                      <span className="progress-result">{result}</span>
+                    ) : null}
+                  </div>
+                  <div
+                    className="progress-mini-board"
+                    aria-label={`${player.solvedCategories.length} groups solved, ${player.mistakesMade} mistakes`}
+                  >
+                    {Array.from({ length: categoryCount }).map((_, index) => (
+                      <span
+                        className={`progress-mini-cell${
+                          player.solvedCategories.includes(index) ? ` solved ${categoryColors[index]}` : ''
+                        }`}
+                        key={index}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <p className="progress-empty">No updates yet</p>
+      )}
+    </aside>
+  )
+}
+
+function MistakeMeter({ mistakesRemaining }: { mistakesRemaining: number }) {
+  return (
+    <div className="mistakes" aria-label={`${mistakesRemaining} mistakes remaining`}>
+      <span>Mistakes remaining:</span>
+      {Array.from({ length: MAX_MISTAKES }).map((_, index) => (
+        <motion.span
+          className={`mistake-dot${index < mistakesRemaining ? '' : ' spent'}`}
+          key={index}
+          animate={{ opacity: index < mistakesRemaining ? 1 : 0.45 }}
+          transition={{ duration: TOAST_ANIMATION_SECONDS }}
+        />
+      ))}
+    </div>
+  )
+}
+
+function GameActions({
+  canDeselect,
+  canReset,
+  canShuffle,
+  canSubmit,
+  onDeselectAll,
+  onReset,
+  onShuffle,
+  onSubmit,
+}: {
+  canDeselect: boolean
+  canReset: boolean
+  canShuffle: boolean
+  canSubmit: boolean
+  onDeselectAll: () => void
+  onReset: () => void
+  onShuffle: () => void
+  onSubmit: () => void
+}) {
+  return (
+    <div className="actions">
+      <button type="button" onClick={onShuffle} disabled={!canShuffle}>
+        Shuffle
+      </button>
+      <button type="button" onClick={onDeselectAll} disabled={!canDeselect}>
+        Deselect all
+      </button>
+      <button className="primary-action" type="button" onClick={onSubmit} disabled={!canSubmit}>
+        Submit
+      </button>
+      {canReset ? (
+        <button type="button" onClick={onReset}>
+          Try again
+        </button>
+      ) : null}
+    </div>
   )
 }
 
