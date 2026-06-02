@@ -199,7 +199,7 @@
   font-weight: 400;
 }
 
-.board-frame {
+.board-frame {  
   --board-gap: clamp(5px, 1.1svh, 8px);
   --board-max-width: min(100%, 1100px);
   --board-height-fit-width: calc(
@@ -215,7 +215,7 @@
   max-width: 1100px;
   display: grid;
   justify-items: center;
-  align-items: start;
+  align-items: center;
 }
 
 .board-surface {
@@ -443,8 +443,15 @@
 
   .game-shell {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
     gap: 6px;
+  }
+
+  .game-shell.has-progress {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .game-shell.no-progress {
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .game-shell.has-progress .game-header {
