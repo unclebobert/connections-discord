@@ -267,7 +267,7 @@
 
 .solved-group h2 {
   margin: 0 0 4px;
-  font-size: clamp(10px, 3svw, 18px);
+  font-size: clamp(10px, min(3svw, 3svh), 18px);
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: 0.02em;
@@ -275,7 +275,7 @@
 }
 
 .solved-group p {
-  font-size: clamp(10px, 3svw, 18px);
+  font-size: clamp(10px, min(3svw, 3svh), 18px);
   font-weight: 500;
   line-height: 1.3;
 }
@@ -515,7 +515,7 @@
 
   .word-card {
     padding: 6px 4px;
-    font-size: clamp(10px, 3svw, 18px);
+    font-size: clamp(10px, min(3svw, 3svh), 18px);
   }
 
   .board-popup {
