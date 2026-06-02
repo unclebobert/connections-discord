@@ -432,7 +432,7 @@
   background: #333;
 }
 
-@media (max-width: 860px) {
+@media (max-width: 640px) {
   .app-shell {
     padding: clamp(8px, 2.5svh, 22px) 12px clamp(8px, 3svh, 28px);
   }
@@ -515,7 +515,7 @@
 
   .word-card {
     padding: 6px 4px;
-    font-size: clamp(10px, 2.8vw, 14px);
+    font-size: clamp(10px, 3svh, 18px);
   }
 
   .board-popup {
@@ -523,16 +523,6 @@
     min-height: 108px;
     border-radius: 18px;
     font-size: 18px;
-  }
-
-  .actions {
-    gap: 8px;
-  }
-
-  .actions button {
-    min-height: 40px;
-    padding: 0 14px;
-    font-size: 14px;
   }
 }
 
