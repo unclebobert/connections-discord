@@ -96,22 +96,18 @@
 .progress-grid-cell {
   width: 9px;
   height: 9px;
-  border: 1px solid #2f3136;
+  border: 1px solid #d7d8dd;
   background: #fff;
 }
 
 .progress-grid-cell.hidden {
+  border-style: none;
   background: #7b7f86;
-}
-
-.progress-grid-cell.blank {
-  border-color: #d7d8dd;
-  background: #fff;
 }
 
 .progress-grid-cell.correct,
 .progress-grid-cell.revealed {
-  border-color: #111;
+  border-style: none;
 }
 
 .title-screen {
