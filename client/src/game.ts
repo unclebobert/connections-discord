@@ -136,6 +136,12 @@ export function toPlayerGuess(cards: PlayCard[]): PlayerGuess | null {
   return cards.map((card) => card.position) as PlayerGuess
 }
 
+export function hasGuessed(progress: PlayerProgress, guess: PlayerGuess) {
+  const guessKey = getGuessKey(guess)
+
+  return progress.some((previousGuess) => getGuessKey(previousGuess) === guessKey)
+}
+
 export function summarizeProgress(progress: PlayerProgress, categories: GameCategory[]): ProgressSummary {
   const positionToCategory = getPositionCategoryMap(categories)
   const solvedSet = new Set<number>()
@@ -178,6 +184,10 @@ function getPositionCategoryMap(categories: GameCategory[]) {
   })
 
   return positions
+}
+
+function getGuessKey(guess: PlayerGuess) {
+  return [...guess].sort((a, b) => a - b).join(':')
 }
 
 function getGuessCategory(guess: PlayerGuess, positionToCategory: Map<number, number>) {

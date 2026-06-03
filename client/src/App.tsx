@@ -10,6 +10,7 @@ import {
   categoryColors,
   formatPuzzleDate,
   getVictoryMessage,
+  hasGuessed,
   isOneAway,
   MAX_MISTAKES,
   shuffleCards,
@@ -206,6 +207,7 @@ function App() {
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [solvedCategories, setSolvedCategories] = useState<number[]>([])
   const [boardCards, setBoardCards] = useState<PlayCard[]>([])
+  const [submittedGuesses, setSubmittedGuesses] = useState<PlayerProgress>([])
   const [mistakesRemaining, setMistakesRemaining] = useState(MAX_MISTAKES)
   const [isGameOver, setIsGameOver] = useState(false)
   const [guessAnimation, setGuessAnimation] = useState<GuessAnimation | null>(null)
@@ -489,6 +491,7 @@ function App() {
     hydratedProgressKey.current = progressConnectionKey
     hasReportedFinalGuess.current = summary.isWon || summary.isGameOver
     setSelectedIds([])
+    setSubmittedGuesses(ownSnapshotProgress.progress)
     setSolvedCategories(summary.solvedCategories)
     setBoardCards(buildCardsForSolvedCategories(data.categories, summary.solvedCategories))
     setMistakesRemaining(MAX_MISTAKES - summary.mistakesMade)
@@ -600,6 +603,11 @@ function App() {
       return
     }
 
+    if (hasGuessed(submittedGuesses, guess)) {
+      showToast('Already guessed!')
+      return
+    }
+
     const submittedIds = selectedCards.map((card) => card.id)
     const categoryIndex = selectedCards[0].categoryIndex
     const isCorrect = selectedCards.every((card) => card.categoryIndex === categoryIndex)
@@ -608,6 +616,7 @@ function App() {
       const nextSolvedCategories = [...solvedCategories, categoryIndex]
       const hasWon = nextSolvedCategories.length === data.categories.length
 
+      setSubmittedGuesses((currentGuesses) => [...currentGuesses, guess])
       queueProgressGuess(guess, hasWon)
       setActiveGuessIds(submittedIds)
       setGuessAnimation('correct')
@@ -650,6 +659,7 @@ function App() {
 
     const nextMistakesRemaining = mistakesRemaining - 1
 
+    setSubmittedGuesses((currentGuesses) => [...currentGuesses, guess])
     queueProgressGuess(guess, nextMistakesRemaining === 0)
     setMistakesRemaining(nextMistakesRemaining)
     setActiveGuessIds(submittedIds)
@@ -672,6 +682,7 @@ function App() {
 
       if (nextMistakesRemaining === 0) {
         setIsGameOver(true)
+        showToast('Next time')
       }
     }, GUESS_JUMP_ANIMATION_MS + INCORRECT_SHAKE_ANIMATION_MS + INCORRECT_CLEAR_BUFFER_MS)
   }
