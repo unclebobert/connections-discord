@@ -9,6 +9,10 @@
   --border: #dfdfd7;
   --sans: "Libre Franklin", Arial, Helvetica, sans-serif;
   --title: "Old Standard TT", Georgia, serif;
+  --safe-area-top: var(--discord-safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --safe-area-right: var(--discord-safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --safe-area-bottom: var(--discord-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --safe-area-left: var(--discord-safe-area-inset-left, env(safe-area-inset-left, 0px));
 
   font: clamp(13px, 2.2svh, 16px)/1.45 var(--sans);
   letter-spacing: 0;

@@ -2,7 +2,11 @@
   width: min(100%, 1180px);
   height: 100svh;
   margin: 0 auto;
-  padding: clamp(10px, 3svh, 28px) 18px clamp(10px, 3.8svh, 36px);
+  padding:
+    calc(clamp(10px, 3svh, 28px) + var(--safe-area-top))
+    calc(18px + var(--safe-area-right))
+    calc(clamp(10px, 3.8svh, 36px) + var(--safe-area-bottom))
+    calc(18px + var(--safe-area-left));
   box-sizing: border-box;
   overflow: visible;
   display: flex;
@@ -434,7 +438,11 @@
 
 @media (max-width: 640px) {
   .app-shell {
-    padding: clamp(8px, 2.5svh, 22px) 12px clamp(8px, 3svh, 28px);
+    padding:
+      calc(clamp(8px, 2.5svh, 22px) + var(--safe-area-top))
+      calc(12px + var(--safe-area-right))
+      calc(clamp(8px, 3svh, 28px) + var(--safe-area-bottom))
+      calc(12px + var(--safe-area-left));
   }
 
   .game-shell {
@@ -517,18 +525,13 @@
     padding: 6px 4px;
     font-size: clamp(10px, min(3svw, 3svh), 18px);
   }
-
-  .board-popup {
-    width: 108px;
-    min-height: 108px;
-    border-radius: 18px;
-    font-size: 18px;
-  }
 }
 
 @media (max-height: 399px) {
   .app-shell {
-    padding-block: 8px;
+    padding-block:
+      calc(8px + var(--safe-area-top))
+      calc(8px + var(--safe-area-bottom));
   }
 
   .game-header {
@@ -539,7 +542,11 @@
 @media (max-height: 199px) {
   .app-shell {
     width: 100%;
-    padding: 0;
+    padding:
+      var(--safe-area-top)
+      var(--safe-area-right)
+      var(--safe-area-bottom)
+      var(--safe-area-left);
     align-items: center;
     justify-content: center;
   }
