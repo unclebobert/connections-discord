@@ -21,15 +21,15 @@
   "kv_namespaces": [
     {
       "binding": "KV",
-      "id": "edc39aa249e14ed9af53b3c0f299748d"
+      "id": "1418b4fd1c4e4ea9a1f0ce336bc05a03"
     }
   ],
-  "secrets": {
-    "required": [
-      "VITE_DISCORD_CLIENT_ID",
-      "DISCORD_CLIENT_SECRET"
-    ]
-  },
+  // "secrets": {
+  //   "required": [
+  //     "VITE_DISCORD_CLIENT_ID",
+  //     "DISCORD_CLIENT_SECRET"
+  //   ]
+  // },
   "durable_objects": {
     "bindings": [
       {
