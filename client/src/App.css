@@ -322,6 +322,8 @@
   padding: clamp(4px, 1svh, 8px);
   border: 0;
   border-radius: 8px;
+  display: grid;
+  place-items: center;
   background: #efefe6;
   color: #111;
   font: inherit;
@@ -335,6 +337,11 @@
   transition:
     background-color 250ms ease,
     color 250ms ease;
+}
+
+.word-card-label {
+  grid-area: 1 / 1;
+  min-width: 0;
 }
 
 .word-card:hover:not(:disabled) {
@@ -520,9 +527,28 @@
     --board-gap: 6px;
   }
 
+  .board-surface,
+  .board-grid {
+    height: 100%;
+  }
+
+  .board-grid {
+    grid-auto-rows: minmax(0, 1fr);
+  }
+
   .word-card {
+    aspect-ratio: unset;
+    height: 100%;
     padding: 6px 4px;
     font-size: clamp(10px, min(3svw, 3svh), 18px);
+  }
+
+  .word-card::before {
+    content: "";
+    grid-area: 1 / 1;
+    width: 100%;
+    aspect-ratio: 15 / 8;
+    pointer-events: none;
   }
 }
 

@@ -786,7 +786,7 @@ function App() {
                         },
                       }}
                     >
-                      {card.content}
+                      <span className="word-card-label">{card.content}</span>
                     </motion.button>
                   )
                 })}
