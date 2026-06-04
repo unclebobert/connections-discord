@@ -194,13 +194,15 @@ function getProgressRows(player: ProgressPlayer, categories: GameCategory[]) {
     rows.push(rowCells);
   }
 
-  // Add blank rows for any remaining unsolved categories
-  rows.push(...Array.from({ length: remainingUnsolved }, (_, rowIndex) => {
-    return Array.from({ length: 4 }, (__, cellIndex) => ({
-      key: `${rowIndex + remainingUnsolved}-${cellIndex}`,
-      className: 'progress-grid-cell blank',
+  if (!hasFinished) {
+    // Add blank rows for any remaining unsolved categories
+    rows.push(...Array.from({ length: remainingUnsolved }, (_, rowIndex) => {
+      return Array.from({ length: 4 }, (__, cellIndex) => ({
+        key: `${rowIndex + remainingUnsolved}-${cellIndex}`,
+        className: 'progress-grid-cell blank',
+      }))
     }))
-  }))
+  }
 
   return rows;
 }
