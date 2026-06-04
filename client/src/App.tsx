@@ -166,7 +166,7 @@ function getCategoryIndexByPosition(categories: GameCategory[], position: number
 }
 
 function getProgressRows(player: ProgressPlayer, categories: GameCategory[]) {
-  const rowCount = Math.min(MAX_PROGRESS_ROWS, Math.max(MIN_PROGRESS_ROWS, player.progress.length))
+  const rowCount = MIN_PROGRESS_ROWS + player.progress.length
   const hasFinished = player.isWon || player.isGameOver
 
   return Array.from({ length: rowCount }).map((_, rowIndex) => {
