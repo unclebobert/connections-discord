@@ -51,7 +51,7 @@ const CARD_SHAKE_X = [-7, 7, -6, 5]
 const TOAST_ANIMATION_SECONDS = 0.18
 const SOLVED_GROUP_ENTER_Y = 10
 const TITLE_ENTER_Y = 10
-const MIN_PROGRESS_ROWS = 4
+const TOTAL_CATEGORIES = 4
 const PROGRESS_RESTORE_TIMEOUT_MS = 8000
 
 type GuessAnimation = 'correct' | 'incorrect'
@@ -165,38 +165,44 @@ function getCategoryIndexByPosition(categories: GameCategory[], position: number
 }
 
 function getProgressRows(player: ProgressPlayer, categories: GameCategory[]) {
-  const rowCount = MIN_PROGRESS_ROWS + player.progress.length
+  type CellInfo = { key: string; className: string }
+  const rows: Array<CellInfo[]> = []
   const hasFinished = player.isWon || player.isGameOver
 
-  return Array.from({ length: rowCount }).map((_, rowIndex) => {
-    const guess = player.progress[rowIndex]
-
-    if (!guess) {
-      return Array.from({ length: 4 }).map((__, cellIndex) => ({
-        key: `${rowIndex}-${cellIndex}`,
-        className: 'progress-grid-cell blank',
-      }))
-    }
-
+  let remainingUnsolved = TOTAL_CATEGORIES;
+  // Fill out rows from guesses
+  for (const [rowIndex, guess] of player.progress.entries()) {
     const guessedCategories = guess.map((position) => getCategoryIndexByPosition(categories, position))
     const firstCategory = guessedCategories[0]
     const isCorrect = firstCategory !== null && guessedCategories.every((categoryIndex) => categoryIndex === firstCategory)
 
-    return guessedCategories.map((categoryIndex, cellIndex) => {
-      const shouldRevealCategory = isCorrect || hasFinished
-      const colorClass = categoryIndex !== null && shouldRevealCategory ? ` ${categoryColors[categoryIndex]}` : ''
-      const stateClass = isCorrect
-        ? ' correct'
-        : hasFinished
-          ? ' revealed'
-          : ' hidden'
-
-      return {
+    let rowCells: CellInfo[]
+    if (isCorrect) {
+      remainingUnsolved--;
+      rowCells = guessedCategories.map((categoryIndex, cellIndex) => ({
         key: `${rowIndex}-${cellIndex}`,
-        className: `progress-grid-cell${stateClass}${colorClass}`,
-      }
-    })
-  })
+        className: `progress-grid-cell correct ${categoryIndex !== null ? categoryColors[categoryIndex] : ''}`,
+      }))
+    } else {
+      // Only reveal guesses for solved categories if the player has finished the game
+      rowCells = guessedCategories.map((categoryIndex, cellIndex) => ({
+        key: `${rowIndex}-${cellIndex}`,
+        className: `progress-grid-cell ${hasFinished ? 'revealed' : 'hidden'} ${categoryIndex !== null ? categoryColors[categoryIndex] : ''}`,
+      }))
+    }
+
+    rows.push(rowCells);
+  }
+
+  // Add blank rows for any remaining unsolved categories
+  rows.push(...Array.from({ length: remainingUnsolved }, (_, rowIndex) => {
+    return Array.from({ length: 4 }, (__, cellIndex) => ({
+      key: `${rowIndex + remainingUnsolved}-${cellIndex}`,
+      className: 'progress-grid-cell blank',
+    }))
+  }))
+
+  return rows;
 }
 
 function App() {
