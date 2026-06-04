@@ -1,6 +1,24 @@
 #!/bin/bash
 
-branch="$(git branch --show-current)"
+set -euo pipefail
+
+branch="${WORKERS_CI_BRANCH:-}"
+
+# (vibed)
+# allegedly "normalizes values like origin/experimental or refs/heads/experimental"
+if [ -z "$branch" ]; then
+    branch="$(git branch --show-current 2>/dev/null || true)"
+fi
+
+if [ -z "$branch" ]; then
+    branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+fi
+
+branch="${branch#refs/heads/}"
+branch="${branch#refs/remotes/origin/}"
+branch="${branch#origin/}"
+
+echo "Building branch: ${branch:-unknown}"
 
 # export the environment variable for production/experimental
 # the client ID (not client secret) is public and safe to expose
