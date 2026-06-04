@@ -52,7 +52,6 @@ const TOAST_ANIMATION_SECONDS = 0.18
 const SOLVED_GROUP_ENTER_Y = 10
 const TITLE_ENTER_Y = 10
 const MIN_PROGRESS_ROWS = 4
-const MAX_PROGRESS_ROWS = 7
 const PROGRESS_RESTORE_TIMEOUT_MS = 8000
 
 type GuessAnimation = 'correct' | 'incorrect'

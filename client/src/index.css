@@ -1,4 +1,12 @@
-@import url("https://fonts.googleapis.com/css2?family=Libre+Franklin:ital,wght@0,100..900;1,100..900&family=Old+Standard+TT:ital,wght@0,400;0,700;1,400&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Libre+Franklin:ital,wght@0,100..900;1,100..900&display=swap");
+
+@font-face {
+  font-family: "Karnak Condensed";
+  src: url("./assets/nyt-karnakcondensed.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   --page-bg: #ffffff;
@@ -8,7 +16,7 @@
   --muted-text: #6f6f68;
   --border: #dfdfd7;
   --sans: "Libre Franklin", Arial, Helvetica, sans-serif;
-  --title: "Old Standard TT", Georgia, serif;
+  --title: "Karnak Condensed", Georgia, serif;
   --safe-area-top: var(--discord-safe-area-inset-top, env(safe-area-inset-top, 0px));
   --safe-area-right: var(--discord-safe-area-inset-right, env(safe-area-inset-right, 0px));
   --safe-area-bottom: var(--discord-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
