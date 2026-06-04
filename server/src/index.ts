@@ -5,6 +5,8 @@ import { ProgressRoom } from './session';
 type Bindings = {
   VITE_DISCORD_CLIENT_ID: string;
   DISCORD_CLIENT_SECRET: string;
+  DISCORD_BOT_TOKEN: string;
+  DISCORD_PUBLIC_KEY: string;
   KV: KVNamespace;
   PROGRESS_ROOMS: DurableObjectNamespace<ProgressRoom>;
 };
@@ -25,6 +27,43 @@ type PlayerProfile = {
   avatarUrl: string | null;
 };
 
+type DiscordInteraction = {
+  type: number;
+  guild_id?: string;
+  channel_id?: string;
+  token: string;
+  data?: {
+    custom_id?: string;
+    type?: number;
+  };
+  member?: {
+    user?: DiscordUser;
+  };
+  user?: DiscordUser;
+};
+
+type ActivityMessageRecord = {
+  guildId: string;
+  channelId: string;
+  messageId: string;
+  updatedAt: number;
+};
+
+type DiscordMessage = {
+  id: string;
+  channel_id: string;
+};
+
+const DISCORD_API_BASE_URL = 'https://discord.com/api/v10';
+const INTERACTION_TYPE_PING = 1;
+const INTERACTION_TYPE_APPLICATION_COMMAND = 2;
+const INTERACTION_TYPE_MESSAGE_COMPONENT = 3;
+const INTERACTION_RESPONSE_PONG = 1;
+const INTERACTION_RESPONSE_CHANNEL_MESSAGE = 4;
+const INTERACTION_RESPONSE_LAUNCH_ACTIVITY = 12;
+const COMMAND_TYPE_PRIMARY_ENTRY_POINT = 4;
+const ACTIVITY_BUTTON_CUSTOM_ID = 'connections:play';
+
 // NOTE: endpoints should never include /api since all requests starting with
 // /api/* will be routed to this server and the prefix gets removed
 // i.e. the client should prepend /api before making requests to the server *if in prod*,
@@ -33,6 +72,50 @@ const app = new Hono<{ Bindings: Bindings }>()
 app.use('*', cors())
 
 app.get('/', (c) => c.text('Connections Discord Bot Server'))
+
+app.post('/interactions', async (c) => {
+  const body = await c.req.text();
+  const isValidRequest = await verifyDiscordInteractionRequest(c.req.raw, body, c.env.DISCORD_PUBLIC_KEY);
+
+  if (!isValidRequest) {
+    return c.text('Invalid request signature', 401);
+  }
+
+  const interaction = JSON.parse(body) as DiscordInteraction;
+
+  if (interaction.type === INTERACTION_TYPE_PING) {
+    return c.json({ type: INTERACTION_RESPONSE_PONG });
+  }
+
+  if (interaction.type === INTERACTION_TYPE_APPLICATION_COMMAND) {
+    if (interaction.data?.type !== COMMAND_TYPE_PRIMARY_ENTRY_POINT) {
+      return c.json(createEphemeralInteractionMessage('Unsupported command.'));
+    }
+
+    const launchContext = getInteractionLaunchContext(interaction);
+    if (!launchContext) {
+      return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
+    }
+
+    c.executionCtx.waitUntil(upsertActivityMessage(c.env, launchContext));
+    return c.json({ type: INTERACTION_RESPONSE_LAUNCH_ACTIVITY });
+  }
+
+  if (
+    interaction.type === INTERACTION_TYPE_MESSAGE_COMPONENT &&
+    interaction.data?.custom_id === ACTIVITY_BUTTON_CUSTOM_ID
+  ) {
+    const launchContext = getInteractionLaunchContext(interaction);
+    if (!launchContext) {
+      return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
+    }
+
+    c.executionCtx.waitUntil(upsertActivityMessage(c.env, launchContext));
+    return c.json({ type: INTERACTION_RESPONSE_LAUNCH_ACTIVITY });
+  }
+
+  return c.json(createEphemeralInteractionMessage('Unsupported interaction.'));
+})
 
 app.get('/ws/:guildId/:date/:userId', async (c) => {
   const upgradeHeader = c.req.header('Upgrade');
@@ -81,6 +164,8 @@ app.get('/ws/:guildId/:date/:userId', async (c) => {
     return c.json({ error: authResult.error }, authResult.status);
   }
 
+  c.executionCtx.waitUntil(updateStoredActivityMessage(c.env, guildId, authResult.profile.displayName));
+
   const room = c.env.PROGRESS_ROOMS.getByName(`${guildId}:${date}`);
 
   const headers = new Headers(c.req.raw.headers);
@@ -89,6 +174,207 @@ app.get('/ws/:guildId/:date/:userId', async (c) => {
 
   return room.fetch(new Request(c.req.raw, { headers }));
 });
+
+function createEphemeralInteractionMessage(content: string) {
+  return {
+    type: INTERACTION_RESPONSE_CHANNEL_MESSAGE,
+    data: {
+      content,
+      flags: 64,
+    },
+  };
+}
+
+function getInteractionLaunchContext(interaction: DiscordInteraction) {
+  const guildId = interaction.guild_id;
+  const channelId = interaction.channel_id;
+
+  if (!guildId || !channelId) {
+    return null;
+  }
+
+  return {
+    guildId,
+    channelId,
+    displayName: getDiscordDisplayName(interaction.member?.user ?? interaction.user),
+  };
+}
+
+function getDiscordDisplayName(user: DiscordUser | undefined) {
+  return user?.global_name || user?.username || 'Someone';
+}
+
+function getActivityMessageKey(guildId: string) {
+  return `activity-message:${guildId}`;
+}
+
+function createActivityMessagePayload(displayName: string) {
+  return {
+    content: `${displayName} was playing Connections`,
+    allowed_mentions: {
+      parse: [],
+    },
+    components: [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 1,
+            label: 'Play now!',
+            custom_id: ACTIVITY_BUTTON_CUSTOM_ID,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+async function upsertActivityMessage(
+  env: Bindings,
+  context: { guildId: string; channelId: string; displayName: string },
+) {
+  if (!env.DISCORD_BOT_TOKEN) {
+    console.error('DISCORD_BOT_TOKEN is not configured; skipping activity message update.');
+    return;
+  }
+
+  const key = getActivityMessageKey(context.guildId);
+  const record = await env.KV.get<ActivityMessageRecord>(key, { type: 'json' });
+  const payload = createActivityMessagePayload(context.displayName);
+
+  if (record && record.channelId === context.channelId) {
+    const editedMessage = await editDiscordMessage(env, record.channelId, record.messageId, payload);
+    if (editedMessage) {
+      await saveActivityMessageRecord(env, context.guildId, editedMessage);
+      return;
+    }
+  }
+
+  const message = await createDiscordMessage(env, context.channelId, payload);
+  if (message) {
+    await saveActivityMessageRecord(env, context.guildId, message);
+  }
+}
+
+async function updateStoredActivityMessage(env: Bindings, guildId: string, displayName: string) {
+  if (!env.DISCORD_BOT_TOKEN) {
+    return;
+  }
+
+  const record = await env.KV.get<ActivityMessageRecord>(getActivityMessageKey(guildId), { type: 'json' });
+  if (!record) {
+    return;
+  }
+
+  const message = await editDiscordMessage(
+    env,
+    record.channelId,
+    record.messageId,
+    createActivityMessagePayload(displayName),
+  );
+
+  if (message) {
+    await saveActivityMessageRecord(env, guildId, message);
+  }
+}
+
+async function saveActivityMessageRecord(env: Bindings, guildId: string, message: DiscordMessage) {
+  await env.KV.put(getActivityMessageKey(guildId), JSON.stringify({
+    guildId,
+    channelId: message.channel_id,
+    messageId: message.id,
+    updatedAt: Date.now(),
+  } satisfies ActivityMessageRecord));
+}
+
+async function createDiscordMessage(env: Bindings, channelId: string, payload: ReturnType<typeof createActivityMessagePayload>) {
+  const response = await fetch(`${DISCORD_API_BASE_URL}/channels/${channelId}/messages`, {
+    method: 'POST',
+    headers: getDiscordBotHeaders(env),
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    console.error('Unable to create activity message:', response.status, await response.text());
+    return null;
+  }
+
+  return response.json<DiscordMessage>();
+}
+
+async function editDiscordMessage(
+  env: Bindings,
+  channelId: string,
+  messageId: string,
+  payload: ReturnType<typeof createActivityMessagePayload>,
+) {
+  const response = await fetch(`${DISCORD_API_BASE_URL}/channels/${channelId}/messages/${messageId}`, {
+    method: 'PATCH',
+    headers: getDiscordBotHeaders(env),
+    body: JSON.stringify(payload),
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    console.error('Unable to edit activity message:', response.status, await response.text());
+    return null;
+  }
+
+  return response.json<DiscordMessage>();
+}
+
+function getDiscordBotHeaders(env: Bindings) {
+  return {
+    Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
+    'Content-Type': 'application/json',
+  };
+}
+
+async function verifyDiscordInteractionRequest(request: Request, body: string, publicKey: string) {
+  const signature = request.headers.get('x-signature-ed25519');
+  const timestamp = request.headers.get('x-signature-timestamp');
+
+  if (!signature || !timestamp || !publicKey) {
+    return false;
+  }
+
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      hexToBytes(publicKey),
+      { name: 'Ed25519' },
+      false,
+      ['verify'],
+    );
+
+    return crypto.subtle.verify(
+      { name: 'Ed25519' },
+      key,
+      hexToBytes(signature),
+      new TextEncoder().encode(`${timestamp}${body}`),
+    );
+  } catch (error) {
+    console.error('Unable to verify Discord interaction signature:', error);
+    return false;
+  }
+}
+
+function hexToBytes(hex: string) {
+  if (hex.length % 2 !== 0 || !/^[\da-f]+$/i.test(hex)) {
+    throw new Error('Invalid hex string length');
+  }
+
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < hex.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(hex.slice(index, index + 2), 16);
+  }
+
+  return bytes;
+}
 
 async function validateDiscordAccess(
   accessToken: string,
