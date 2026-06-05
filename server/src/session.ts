@@ -94,6 +94,12 @@ export class ProgressRoom extends DurableObject<Env> {
     const date = request.headers.get('x-progress-date');
     const encodedProfile = request.headers.get('x-progress-profile');
     if (!userId || !guildId || !date || !encodedProfile) {
+      console.warn('progress_room:missing_authenticated_user', {
+        hasUserId: Boolean(userId),
+        hasGuildId: Boolean(guildId),
+        hasDate: Boolean(date),
+        hasProfile: Boolean(encodedProfile),
+      });
       return new Response('Missing authenticated progress user', {
         status: 401,
       });
@@ -110,6 +116,13 @@ export class ProgressRoom extends DurableObject<Env> {
   }
 
   join(userId: string, guildId: string, date: string, profile: PlayerProfile) {
+    console.log('progress_room:join', {
+      guildId,
+      date,
+      userId,
+      hasAvatar: Boolean(profile.avatarUrl),
+    });
+
     const existingSocket = this.users.get(userId);
     if (existingSocket && existingSocket.readyState === WebSocket.OPEN) {
       existingSocket.close(1000, 'New connection established');
@@ -155,6 +168,11 @@ export class ProgressRoom extends DurableObject<Env> {
         return;
       }
       const attachment = this.getSocketAttachment(ws);
+      console.log('progress_room:message_guess', {
+        guildId: attachment.guildId,
+        date: attachment.date,
+        userId: attachment.userId,
+      });
       this.saveGuess(attachment, guess as PlayerGuess);
     } catch (error) {
       console.error('Error parsing guess:', error);
@@ -194,13 +212,7 @@ export class ProgressRoom extends DurableObject<Env> {
     return attachment as SocketAttachment;
   }
 
-  hasAnyProgress() {
-    return Array.from(this.userProgress.values()).some((progress) => progress.length > 0);
-  }
-
   async saveGuess({ userId, guildId, date }: SocketAttachment, newGuess: PlayerGuess) {
-    const shouldSendActivityMessage = !this.hasAnyProgress();
-
     // Update in-memory progress and persist to SQL storage
     if (this.userProgress.has(userId)) {
       this.userProgress.get(userId)?.push(newGuess);
@@ -214,7 +226,14 @@ export class ProgressRoom extends DurableObject<Env> {
       ON CONFLICT(user_id) DO UPDATE SET progress=excluded.progress;
     `, userId, JSON.stringify(progress));
 
-    if (shouldSendActivityMessage && guildId && date) {
+    console.log('progress:guess_saved', {
+      guildId,
+      date,
+      userId,
+      guessCount: progress.length,
+    });
+
+    if (guildId && date) {
       await sendActivityLaunchMessageAfterFirstGuess(
         this.env,
         guildId,

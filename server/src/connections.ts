@@ -16,37 +16,61 @@ export function registerConnectionsRoutes(app: App) {
     const guildId = c.req.param('guildId');
     const date = c.req.param('date');
     const userId = c.req.param('userId');
+    console.log('progress_ws:request', {
+      guildId,
+      date,
+      userId,
+    });
+
     if (!guildId || !date || !userId) {
+      console.warn('progress_ws:missing_params');
       return new Response('Missing guildId, date, or userId', {
         status: 400,
       });
     }
 
     if (!isValidPuzzleDate(date)) {
+      console.warn('progress_ws:invalid_date_format', { guildId, date, userId });
       return new Response('Invalid date format', {
         status: 400,
       });
     }
 
     if (isPuzzleDateTooFarFromToday(date)) {
+      console.warn('progress_ws:invalid_date_range', { guildId, date, userId });
       return new Response('Invalid date', {
         status: 400,
       });
     }
 
     if (!isDiscordSnowflake(guildId) || !isDiscordSnowflake(userId)) {
+      console.warn('progress_ws:invalid_snowflake', { guildId, date, userId });
       return c.json({ error: 'Invalid guild ID or user ID' }, 400);
     }
 
     const accessToken = c.req.query('access_token');
     if (!accessToken) {
+      console.warn('progress_ws:missing_access_token', { guildId, date, userId });
       return c.json({ error: 'Missing access token' }, 401);
     }
 
     const authResult = await validateDiscordAccess(accessToken, userId, guildId);
     if (!authResult.ok) {
+      console.warn('progress_ws:auth_failed', {
+        guildId,
+        date,
+        userId,
+        status: authResult.status,
+        error: authResult.error,
+      });
       return c.json({ error: authResult.error }, authResult.status);
     }
+
+    console.log('progress_ws:auth_ok', {
+      guildId,
+      date,
+      userId,
+    });
 
     const room = c.env.PROGRESS_ROOMS.getByName(`${guildId}:${date}`);
     const headers = new Headers(c.req.raw.headers);

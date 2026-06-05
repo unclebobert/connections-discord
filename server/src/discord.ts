@@ -99,6 +99,12 @@ export async function storePendingActivityLaunchMessage(
   } satisfies PendingActivityLaunchMessage), {
     expirationTtl: Math.ceil(INTERACTION_TOKEN_TTL_MS / 1000),
   });
+
+  console.log('activity_message:pending_stored', {
+    guildId: context.guildId,
+    channelId: context.channelId,
+    expiresInMs: INTERACTION_TOKEN_TTL_MS,
+  });
 }
 
 export async function sendActivityLaunchMessageAfterFirstGuess(
@@ -110,15 +116,37 @@ export async function sendActivityLaunchMessageAfterFirstGuess(
   const sentKey = getSentActivityLaunchMessageKey(guildId, date);
   const hasSentMessage = await env.KV.get(sentKey);
   if (hasSentMessage) {
+    console.log('activity_message:skip_already_sent', {
+      guildId,
+      date,
+    });
     return;
   }
 
   const pendingKey = getPendingActivityLaunchMessageKey(guildId);
   const pendingMessage = await env.KV.get<PendingActivityLaunchMessage>(pendingKey, { type: 'json' });
-  if (!pendingMessage || pendingMessage.expiresAt <= Date.now()) {
+  if (!pendingMessage) {
+    console.warn('activity_message:skip_missing_pending_token', {
+      guildId,
+      date,
+    });
     return;
   }
 
+  if (pendingMessage.expiresAt <= Date.now()) {
+    console.warn('activity_message:skip_expired_pending_token', {
+      guildId,
+      date,
+      expiredByMs: Date.now() - pendingMessage.expiresAt,
+    });
+    return;
+  }
+
+  console.log('activity_message:followup_attempt', {
+    guildId,
+    date,
+    channelId: pendingMessage.channelId,
+  });
   const didSend = await createInteractionFollowup(
     env,
     pendingMessage.interactionToken,
@@ -130,6 +158,11 @@ export async function sendActivityLaunchMessageAfterFirstGuess(
       env.KV.put(sentKey, '1', { expirationTtl: 60 * 60 * 24 * 4 }),
       env.KV.delete(pendingKey),
     ]);
+    console.log('activity_message:followup_sent', {
+      guildId,
+      date,
+      channelId: pendingMessage.channelId,
+    });
   }
 }
 
@@ -311,6 +344,9 @@ async function createInteractionFollowup(
     return false;
   }
 
+  console.log('activity_message:followup_response_ok', {
+    status: response.status,
+  });
   return true;
 }
 

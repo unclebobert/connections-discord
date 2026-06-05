@@ -20,10 +20,19 @@ export async function handleDiscordInteraction(c: Context<{ Bindings: Bindings }
   const isValidRequest = await verifyDiscordInteractionRequest(c.req.raw, body, c.env.DISCORD_PUBLIC_KEY);
 
   if (!isValidRequest) {
+    console.warn('interaction:invalid_signature');
     return c.text('Invalid request signature', 401);
   }
 
   const interaction = JSON.parse(body) as DiscordInteraction;
+  console.log('interaction:received', {
+    type: interaction.type,
+    dataType: interaction.data?.type ?? null,
+    customId: interaction.data?.custom_id ?? null,
+    guildId: interaction.guild_id ?? null,
+    channelId: interaction.channel_id ?? null,
+    userId: interaction.member?.user?.id ?? interaction.user?.id ?? null,
+  });
 
   if (interaction.type === INTERACTION_TYPE_PING) {
     return c.json({ type: INTERACTION_RESPONSE_PONG });
@@ -50,18 +59,28 @@ export async function handleDiscordInteraction(c: Context<{ Bindings: Bindings }
 function handleActivityLaunchInteraction(c: Context<{ Bindings: Bindings }>, interaction: DiscordInteraction) {
   const launchContext = getInteractionLaunchContext(interaction);
   if (!launchContext) {
+    console.warn('interaction:launch_missing_context');
     return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
   }
 
+  console.log('interaction:launch_activity', {
+    guildId: launchContext.guildId,
+    channelId: launchContext.channelId,
+  });
   return c.json({ type: INTERACTION_RESPONSE_LAUNCH_ACTIVITY });
 }
 
 async function handleActivityEntryPointInteraction(c: Context<{ Bindings: Bindings }>, interaction: DiscordInteraction) {
   const launchContext = getInteractionLaunchContext(interaction);
   if (!launchContext) {
+    console.warn('interaction:entrypoint_missing_context');
     return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
   }
 
   await storePendingActivityLaunchMessage(c.env, interaction.token, launchContext);
+  console.log('interaction:entrypoint_launch_activity', {
+    guildId: launchContext.guildId,
+    channelId: launchContext.channelId,
+  });
   return c.json({ type: INTERACTION_RESPONSE_LAUNCH_ACTIVITY });
 }
