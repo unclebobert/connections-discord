@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { sendActivityLaunchMessageAfterFirstGuess } from './discord';
 
 type PlayerGuess = [number, number, number, number];
 type PlayerProgress = Array<PlayerGuess>;
@@ -6,9 +7,15 @@ type PlayerProfile = {
   displayName: string;
   avatarUrl: string | null;
 };
+type SocketAttachment = {
+  userId: string;
+  guildId: string;
+  date: string;
+};
 
 export class ProgressRoom extends DurableObject<Env> {
   sql: SqlStorage;
+  env: Env;
   users: Map<string, WebSocket>;
   userProgress: Map<string, PlayerProgress>;
   userProfiles: Map<string, PlayerProfile>;
@@ -16,6 +23,7 @@ export class ProgressRoom extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     // Required, as we're extending the base class.
     super(ctx, env)
+    this.env = env;
     this.sql = ctx.storage.sql;
     // Since this can hibernate when websockets are idle, need to restore
     // the users map from the stored currently connected websockets,
@@ -67,9 +75,9 @@ export class ProgressRoom extends DurableObject<Env> {
   }
 
   removeSocket(ws: WebSocket) {
-    const userId = ws.deserializeAttachment();
-    if (this.users.get(userId) === ws) {
-      this.users.delete(userId);
+    const attachment = this.getSocketAttachment(ws);
+    if (this.users.get(attachment.userId) === ws) {
+      this.users.delete(attachment.userId);
     }
   }
 
@@ -82,15 +90,17 @@ export class ProgressRoom extends DurableObject<Env> {
     }
 
     const userId = request.headers.get('x-progress-user-id');
+    const guildId = request.headers.get('x-progress-guild-id');
+    const date = request.headers.get('x-progress-date');
     const encodedProfile = request.headers.get('x-progress-profile');
-    if (!userId || !encodedProfile) {
+    if (!userId || !guildId || !date || !encodedProfile) {
       return new Response('Missing authenticated progress user', {
         status: 401,
       });
     }
 
     try {
-      return this.join(userId, JSON.parse(decodeURIComponent(encodedProfile)) as PlayerProfile);
+      return this.join(userId, guildId, date, JSON.parse(decodeURIComponent(encodedProfile)) as PlayerProfile);
     } catch (error) {
       console.error('Error opening progress socket:', error);
       return new Response('Invalid progress user metadata', {
@@ -99,7 +109,7 @@ export class ProgressRoom extends DurableObject<Env> {
     }
   }
 
-  join(userId: string, profile: PlayerProfile) {
+  join(userId: string, guildId: string, date: string, profile: PlayerProfile) {
     const existingSocket = this.users.get(userId);
     if (existingSocket && existingSocket.readyState === WebSocket.OPEN) {
       existingSocket.close(1000, 'New connection established');
@@ -110,7 +120,7 @@ export class ProgressRoom extends DurableObject<Env> {
 
     // use this instead of websocket.accept() since it allows hibernation
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment(userId);
+    server.serializeAttachment({ userId, guildId, date } satisfies SocketAttachment);
     this.users.set(userId, server);
     this.saveProfile(userId, profile);
 
@@ -144,8 +154,8 @@ export class ProgressRoom extends DurableObject<Env> {
         console.error('Invalid guess format');
         return;
       }
-      const userId = ws.deserializeAttachment();
-      this.saveGuess(userId, guess as PlayerGuess);
+      const attachment = this.getSocketAttachment(ws);
+      this.saveGuess(attachment, guess as PlayerGuess);
     } catch (error) {
       console.error('Error parsing guess:', error);
     }
@@ -170,7 +180,27 @@ export class ProgressRoom extends DurableObject<Env> {
     `, userId, profile.displayName, profile.avatarUrl);
   }
 
-  async saveGuess(userId: string, newGuess: PlayerGuess) {
+  getSocketAttachment(ws: WebSocket): SocketAttachment {
+    const attachment = ws.deserializeAttachment();
+
+    if (typeof attachment === 'string') {
+      return {
+        userId: attachment,
+        guildId: '',
+        date: '',
+      };
+    }
+
+    return attachment as SocketAttachment;
+  }
+
+  hasAnyProgress() {
+    return Array.from(this.userProgress.values()).some((progress) => progress.length > 0);
+  }
+
+  async saveGuess({ userId, guildId, date }: SocketAttachment, newGuess: PlayerGuess) {
+    const shouldSendActivityMessage = !this.hasAnyProgress();
+
     // Update in-memory progress and persist to SQL storage
     if (this.userProgress.has(userId)) {
       this.userProgress.get(userId)?.push(newGuess);
@@ -183,6 +213,16 @@ export class ProgressRoom extends DurableObject<Env> {
       VALUES (?, ?)
       ON CONFLICT(user_id) DO UPDATE SET progress=excluded.progress;
     `, userId, JSON.stringify(progress));
+
+    if (shouldSendActivityMessage && guildId && date) {
+      await sendActivityLaunchMessageAfterFirstGuess(
+        this.env,
+        guildId,
+        date,
+        this.userProfiles.get(userId)?.displayName ?? 'Someone',
+      );
+    }
+
     // Send progress update to all connected clients via websocket
     for (const [observerUserId, socket] of this.users.entries()) {
       if (observerUserId === userId) continue; // Don't send progress update to the user who made the update

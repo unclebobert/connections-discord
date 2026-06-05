@@ -28,7 +28,6 @@
     "required": [
       "VITE_DISCORD_CLIENT_ID",
       "DISCORD_CLIENT_SECRET",
-      "DISCORD_BOT_TOKEN",
       "DISCORD_PUBLIC_KEY"
     ]
   },
