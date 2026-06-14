@@ -246,8 +246,8 @@ function App() {
   const hasReportedFinalGuess = useRef(false)
   const hydratedProgressKey = useRef<string | null>(null)
   const puzzleDate = useMemo(() => formatPuzzleDate(new Date()), [])
-  const progressConnectionKey = discordSession?.guildId && discordSession.user.id
-    ? `${discordSession.guildId}:${discordSession.user.id}:${puzzleDate}`
+  const progressConnectionKey = discordSession?.guildId && discordSession.channelId && discordSession.user.id
+    ? `${discordSession.guildId}:${discordSession.channelId}:${discordSession.user.id}:${puzzleDate}`
     : null
   const isProgressRestoreReady = isDiscordReady && (
     !progressConnectionKey ||
@@ -333,20 +333,21 @@ function App() {
 
   useEffect(() => {
     const guildId = discordSession?.guildId
+    const channelId = discordSession?.channelId
     const userId = discordSession?.user.id
     const accessToken = discordSession?.accessToken
-    const connectionKey = guildId && userId
-      ? `${guildId}:${userId}:${puzzleDate}`
+    const connectionKey = guildId && channelId && userId
+      ? `${guildId}:${channelId}:${userId}:${puzzleDate}`
       : null
 
     pendingProgressGuesses.current = []
     hasReportedFinalGuess.current = false
 
-    if (!guildId || !userId || !accessToken || !connectionKey) {
+    if (!guildId || !channelId || !userId || !accessToken || !connectionKey) {
       return
     }
 
-    const socket = new WebSocket(getProgressWebSocketUrl(guildId, puzzleDate, userId, accessToken))
+    const socket = new WebSocket(getProgressWebSocketUrl(guildId, channelId, puzzleDate, userId, accessToken))
     let hasReceivedSnapshot = false
     const restoreTimeout = window.setTimeout(() => {
       if (!hasReceivedSnapshot) {
@@ -425,7 +426,7 @@ function App() {
       window.clearTimeout(restoreTimeout)
       socket.close()
     }
-  }, [discordSession?.accessToken, discordSession?.guildId, discordSession?.user.id, puzzleDate])
+  }, [discordSession?.accessToken, discordSession?.channelId, discordSession?.guildId, discordSession?.user.id, puzzleDate])
 
   const selectedCards = useMemo(
     () => boardCards.filter((card) => selectedIds.includes(card.id)),

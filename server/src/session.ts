@@ -1,8 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
-import { sendActivityLaunchMessageAfterFirstGuess } from './discord';
+import { updateActivityLaunchMessageForProgress } from './discord';
+import { countCorrectGuesses, getPuzzleData, type PlayerGuess, type PlayerProgress } from './puzzles';
 
-type PlayerGuess = [number, number, number, number];
-type PlayerProgress = Array<PlayerGuess>;
 type PlayerProfile = {
   displayName: string;
   avatarUrl: string | null;
@@ -10,6 +9,7 @@ type PlayerProfile = {
 type SocketAttachment = {
   userId: string;
   guildId: string;
+  channelId: string;
   date: string;
 };
 
@@ -30,7 +30,8 @@ export class ProgressRoom extends DurableObject<Env> {
     // because DOs get killed when hibernating
     this.users = new Map();
     for (const socket of this.ctx.getWebSockets()) {
-      this.users.set(socket.deserializeAttachment(), socket);
+      const attachment = this.getSocketAttachment(socket);
+      this.users.set(attachment.userId, socket);
     }
     // Repopulate user progress from SQL storage, after hibernation
     this.userProgress = new Map();
@@ -91,12 +92,14 @@ export class ProgressRoom extends DurableObject<Env> {
 
     const userId = request.headers.get('x-progress-user-id');
     const guildId = request.headers.get('x-progress-guild-id');
+    const channelId = request.headers.get('x-progress-channel-id');
     const date = request.headers.get('x-progress-date');
     const encodedProfile = request.headers.get('x-progress-profile');
-    if (!userId || !guildId || !date || !encodedProfile) {
+    if (!userId || !guildId || !channelId || !date || !encodedProfile) {
       console.warn('progress_room:missing_authenticated_user', {
         hasUserId: Boolean(userId),
         hasGuildId: Boolean(guildId),
+        hasChannelId: Boolean(channelId),
         hasDate: Boolean(date),
         hasProfile: Boolean(encodedProfile),
       });
@@ -106,7 +109,13 @@ export class ProgressRoom extends DurableObject<Env> {
     }
 
     try {
-      return this.join(userId, guildId, date, JSON.parse(decodeURIComponent(encodedProfile)) as PlayerProfile);
+      return await this.join(
+        userId,
+        guildId,
+        channelId,
+        date,
+        JSON.parse(decodeURIComponent(encodedProfile)) as PlayerProfile,
+      );
     } catch (error) {
       console.error('Error opening progress socket:', error);
       return new Response('Invalid progress user metadata', {
@@ -115,9 +124,10 @@ export class ProgressRoom extends DurableObject<Env> {
     }
   }
 
-  join(userId: string, guildId: string, date: string, profile: PlayerProfile) {
+  async join(userId: string, guildId: string, channelId: string, date: string, profile: PlayerProfile) {
     console.log('progress_room:join', {
       guildId,
+      channelId,
       date,
       userId,
       hasAvatar: Boolean(profile.avatarUrl),
@@ -133,9 +143,10 @@ export class ProgressRoom extends DurableObject<Env> {
 
     // use this instead of websocket.accept() since it allows hibernation
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ userId, guildId, date } satisfies SocketAttachment);
+    server.serializeAttachment({ userId, guildId, channelId, date } satisfies SocketAttachment);
     this.users.set(userId, server);
     this.saveProfile(userId, profile);
+    await this.updateActivityMessageForPlayer(userId, guildId, channelId, date);
 
     // send initial progress of all users to the newly connected client
     const usersProgress = Array.from(this.userProgress.entries())
@@ -170,10 +181,11 @@ export class ProgressRoom extends DurableObject<Env> {
       const attachment = this.getSocketAttachment(ws);
       console.log('progress_room:message_guess', {
         guildId: attachment.guildId,
+        channelId: attachment.channelId,
         date: attachment.date,
         userId: attachment.userId,
       });
-      this.saveGuess(attachment, guess as PlayerGuess);
+      await this.saveGuess(attachment, guess as PlayerGuess);
     } catch (error) {
       console.error('Error parsing guess:', error);
     }
@@ -205,6 +217,7 @@ export class ProgressRoom extends DurableObject<Env> {
       return {
         userId: attachment,
         guildId: '',
+        channelId: '',
         date: '',
       };
     }
@@ -212,7 +225,7 @@ export class ProgressRoom extends DurableObject<Env> {
     return attachment as SocketAttachment;
   }
 
-  async saveGuess({ userId, guildId, date }: SocketAttachment, newGuess: PlayerGuess) {
+  async saveGuess({ userId, guildId, channelId, date }: SocketAttachment, newGuess: PlayerGuess) {
     // Update in-memory progress and persist to SQL storage
     if (this.userProgress.has(userId)) {
       this.userProgress.get(userId)?.push(newGuess);
@@ -228,19 +241,13 @@ export class ProgressRoom extends DurableObject<Env> {
 
     console.log('progress:guess_saved', {
       guildId,
+      channelId,
       date,
       userId,
       guessCount: progress.length,
     });
 
-    if (guildId && date) {
-      await sendActivityLaunchMessageAfterFirstGuess(
-        this.env,
-        guildId,
-        date,
-        this.userProfiles.get(userId)?.displayName ?? 'Someone',
-      );
-    }
+    await this.updateActivityMessageForPlayer(userId, guildId, channelId, date);
 
     // Send progress update to all connected clients via websocket
     for (const [observerUserId, socket] of this.users.entries()) {
@@ -261,5 +268,29 @@ export class ProgressRoom extends DurableObject<Env> {
         console.error('Error sending progress update:', error);
       }
     }
+  }
+
+  async updateActivityMessageForPlayer(userId: string, guildId: string, channelId: string, date: string) {
+    if (!guildId || !channelId || !date) {
+      return;
+    }
+
+    const progress = this.userProgress.get(userId) ?? [];
+    const puzzle = await getPuzzleData(this.env, date);
+    if (!puzzle) {
+      console.warn('activity_message:skip_missing_puzzle', {
+        guildId,
+        channelId,
+        date,
+        userId,
+      });
+      return;
+    }
+
+    await updateActivityLaunchMessageForProgress(this.env, guildId, channelId, date, {
+      userId,
+      displayName: this.userProfiles.get(userId)?.displayName ?? 'Someone',
+      correctGuesses: countCorrectGuesses(progress, puzzle),
+    });
   }
 }

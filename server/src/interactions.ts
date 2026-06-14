@@ -9,11 +9,14 @@ import {
   INTERACTION_TYPE_APPLICATION_COMMAND,
   INTERACTION_TYPE_MESSAGE_COMPONENT,
   INTERACTION_TYPE_PING,
-  storePendingActivityLaunchMessage,
+  updateActivityLaunchMessageForInteraction,
   verifyDiscordInteractionRequest,
   type DiscordInteraction,
 } from './discord';
 import type { Bindings } from './env';
+import { getCurrentPuzzleDate } from './puzzles';
+
+const FOLLOWUP_SEND_DELAY_MS = 250;
 
 export async function handleDiscordInteraction(c: Context<{ Bindings: Bindings }>) {
   const body = await c.req.text();
@@ -63,24 +66,35 @@ function handleActivityLaunchInteraction(c: Context<{ Bindings: Bindings }>, int
     return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
   }
 
+  const date = getCurrentPuzzleDate();
+  c.executionCtx.waitUntil((async () => {
+    await new Promise((resolve) => setTimeout(resolve, FOLLOWUP_SEND_DELAY_MS));
+    await updateActivityLaunchMessageForInteraction(c.env, interaction.token, launchContext, date);
+  })());
   console.log('interaction:launch_activity', {
     guildId: launchContext.guildId,
     channelId: launchContext.channelId,
+    date,
   });
   return c.json({ type: INTERACTION_RESPONSE_LAUNCH_ACTIVITY });
 }
 
-async function handleActivityEntryPointInteraction(c: Context<{ Bindings: Bindings }>, interaction: DiscordInteraction) {
+function handleActivityEntryPointInteraction(c: Context<{ Bindings: Bindings }>, interaction: DiscordInteraction) {
   const launchContext = getInteractionLaunchContext(interaction);
   if (!launchContext) {
     console.warn('interaction:entrypoint_missing_context');
     return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
   }
 
-  await storePendingActivityLaunchMessage(c.env, interaction.token, launchContext);
+  const date = getCurrentPuzzleDate();
+  c.executionCtx.waitUntil((async () => {
+    await new Promise((resolve) => setTimeout(resolve, FOLLOWUP_SEND_DELAY_MS));
+    await updateActivityLaunchMessageForInteraction(c.env, interaction.token, launchContext, date);
+  })());
   console.log('interaction:entrypoint_launch_activity', {
     guildId: launchContext.guildId,
     channelId: launchContext.channelId,
+    date,
   });
   return c.json({ type: INTERACTION_RESPONSE_LAUNCH_ACTIVITY });
 }

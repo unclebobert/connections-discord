@@ -5,6 +5,7 @@ type DiscordAuth = Awaited<ReturnType<DiscordSDK['commands']['authenticate']>>
 export interface DiscordSession {
   accessToken: string
   guildId: string | null
+  channelId: string | null
   user: DiscordAuth['user']
 }
 
@@ -54,6 +55,7 @@ async function setupDiscordSDK(): Promise<DiscordSession | null> {
   return {
     accessToken: auth.access_token,
     guildId: discordSDK.guildId,
+    channelId: discordSDK.channelId,
     user: auth.user,
   }
 }

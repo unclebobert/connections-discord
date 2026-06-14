@@ -21,6 +21,9 @@ export type DiscordInteraction = {
   guild_id?: string;
   channel_id?: string;
   token: string;
+  message?: {
+    id: string;
+  };
   data?: {
     custom_id?: string;
     type?: number;
@@ -34,12 +37,29 @@ export type DiscordInteraction = {
 export type InteractionLaunchContext = {
   guildId: string;
   channelId: string;
+  userId: string;
   displayName: string;
 };
 
-type PendingActivityLaunchMessage = InteractionLaunchContext & {
-  interactionToken: string;
-  expiresAt: number;
+export type ActivityMessagePlayer = {
+  userId: string;
+  displayName: string;
+  correctGuesses: number;
+};
+
+type ActivityMessageState = {
+  guildId: string;
+  channelId: string;
+  date: string;
+  messageId: string | null;
+  interactionToken: string | null;
+  tokenExpiresAt: number;
+  lastUpdatedAt: number;
+  players: ActivityMessagePlayer[];
+};
+
+type ActivityMessageEnv = Pick<Bindings, 'KV'> & {
+  VITE_DISCORD_CLIENT_ID?: string;
 };
 
 type DiscordTokenResponse = {
@@ -49,6 +69,8 @@ type DiscordTokenResponse = {
 
 const DISCORD_API_BASE_URL = 'https://discord.com/api/v10';
 const INTERACTION_TOKEN_TTL_MS = 14 * 60 * 1000;
+const MESSAGE_STALE_AFTER_MS = 60 * 60 * 1000;
+const MESSAGE_STATE_TTL_SECONDS = 60 * 60 * 24 * 4;
 export const INTERACTION_TYPE_PING = 1;
 export const INTERACTION_TYPE_APPLICATION_COMMAND = 2;
 export const INTERACTION_TYPE_MESSAGE_COMPONENT = 3;
@@ -71,15 +93,17 @@ export function createEphemeralInteractionMessage(content: string) {
 export function getInteractionLaunchContext(interaction: DiscordInteraction) {
   const guildId = interaction.guild_id;
   const channelId = interaction.channel_id;
+  const user = interaction.member?.user ?? interaction.user;
 
-  if (!guildId || !channelId) {
+  if (!guildId || !channelId || !user) {
     return null;
   }
 
   return {
     guildId,
     channelId,
-    displayName: getDiscordDisplayName(interaction.member?.user ?? interaction.user),
+    userId: user.id,
+    displayName: getDiscordDisplayName(user),
   };
 }
 
@@ -87,81 +111,131 @@ export function getDiscordDisplayName(user: DiscordUser | undefined) {
   return user?.global_name || user?.username || 'Someone';
 }
 
-export async function storePendingActivityLaunchMessage(
-  env: Bindings,
+export async function updateActivityLaunchMessageForInteraction(
+  env: ActivityMessageEnv,
   interactionToken: string,
   context: InteractionLaunchContext,
+  date: string,
 ) {
-  await env.KV.put(getPendingActivityLaunchMessageKey(context.guildId), JSON.stringify({
-    ...context,
-    interactionToken,
-    expiresAt: Date.now() + INTERACTION_TOKEN_TTL_MS,
-  } satisfies PendingActivityLaunchMessage), {
-    expirationTtl: Math.ceil(INTERACTION_TOKEN_TTL_MS / 1000),
-  });
-
-  console.log('activity_message:pending_stored', {
+  await updateActivityLaunchMessage(env, {
     guildId: context.guildId,
     channelId: context.channelId,
-    expiresInMs: INTERACTION_TOKEN_TTL_MS,
+    date,
+    interactionToken,
+    player: {
+      userId: context.userId,
+      displayName: context.displayName,
+      correctGuesses: 0,
+    },
+    canCreateMessage: true,
   });
 }
 
-export async function sendActivityLaunchMessageAfterFirstGuess(
-  env: Bindings,
+export async function updateActivityLaunchMessageForProgress(
+  env: ActivityMessageEnv,
   guildId: string,
+  channelId: string,
   date: string,
-  displayName: string,
+  player: ActivityMessagePlayer,
 ) {
-  const sentKey = getSentActivityLaunchMessageKey(guildId, date);
-  const hasSentMessage = await env.KV.get(sentKey);
-  if (hasSentMessage) {
-    console.log('activity_message:skip_already_sent', {
-      guildId,
-      date,
+  await updateActivityLaunchMessage(env, {
+    guildId,
+    channelId,
+    date,
+    player,
+    canCreateMessage: false,
+  });
+}
+
+async function updateActivityLaunchMessage(
+  env: ActivityMessageEnv,
+  options: {
+    guildId: string;
+    channelId: string;
+    date: string;
+    interactionToken?: string;
+    player: ActivityMessagePlayer;
+    canCreateMessage: boolean;
+  },
+) {
+  const stateKey = getActivityMessageStateKey(options.guildId, options.channelId, options.date);
+  const now = Date.now();
+  const previousState = await env.KV.get<ActivityMessageState>(stateKey, { type: 'json' });
+  const state = upsertActivityMessagePlayer(previousState, options, now);
+  const canEditExistingMessage = Boolean(
+    state.messageId &&
+    state.interactionToken &&
+    state.tokenExpiresAt > now &&
+    now - (previousState?.lastUpdatedAt ?? 0) <= MESSAGE_STALE_AFTER_MS,
+  );
+
+  if (canEditExistingMessage) {
+    console.log('activity_message:edit_attempt', {
+      guildId: options.guildId,
+      channelId: options.channelId,
+      date: options.date,
+      playerCount: state.players.length,
     });
-    return;
+
+    const didEdit = await editInteractionFollowup(
+      env,
+      state.interactionToken!,
+      state.messageId!,
+      createActivityMessagePayload(state),
+    );
+
+    if (didEdit) {
+      await putActivityMessageState(env, stateKey, {
+        ...state,
+        lastUpdatedAt: now,
+      });
+      console.log('activity_message:edit_sent', {
+        guildId: options.guildId,
+        channelId: options.channelId,
+        date: options.date,
+      });
+      return;
+    }
   }
 
-  const pendingKey = getPendingActivityLaunchMessageKey(guildId);
-  const pendingMessage = await env.KV.get<PendingActivityLaunchMessage>(pendingKey, { type: 'json' });
-  if (!pendingMessage) {
-    console.warn('activity_message:skip_missing_pending_token', {
-      guildId,
-      date,
+  if (!options.canCreateMessage || !options.interactionToken) {
+    console.warn('activity_message:skip_no_fresh_interaction', {
+      guildId: options.guildId,
+      channelId: options.channelId,
+      date: options.date,
+      reason: previousState?.lastUpdatedAt && now - previousState.lastUpdatedAt > MESSAGE_STALE_AFTER_MS
+        ? 'last_update_over_one_hour'
+        : 'missing_or_expired_edit_token',
     });
-    return;
-  }
-
-  if (pendingMessage.expiresAt <= Date.now()) {
-    console.warn('activity_message:skip_expired_pending_token', {
-      guildId,
-      date,
-      expiredByMs: Date.now() - pendingMessage.expiresAt,
-    });
+    await putActivityMessageState(env, stateKey, state);
     return;
   }
 
   console.log('activity_message:followup_attempt', {
-    guildId,
-    date,
-    channelId: pendingMessage.channelId,
+    guildId: options.guildId,
+    channelId: options.channelId,
+    date: options.date,
+    playerCount: state.players.length,
   });
-  const didSend = await createInteractionFollowup(
+  const message = await createInteractionFollowup(
     env,
-    pendingMessage.interactionToken,
-    createActivityMessagePayload(displayName),
+    options.interactionToken,
+    createActivityMessagePayload(state),
   );
 
-  if (didSend) {
-    await Promise.all([
-      env.KV.put(sentKey, '1', { expirationTtl: 60 * 60 * 24 * 4 }),
-      env.KV.delete(pendingKey),
-    ]);
+  if (message) {
+    await putActivityMessageState(env, stateKey, {
+      ...state,
+      messageId: message.id,
+      interactionToken: options.interactionToken,
+      tokenExpiresAt: now + INTERACTION_TOKEN_TTL_MS,
+      lastUpdatedAt: now,
+    });
     console.log('activity_message:followup_sent', {
-      guildId,
-      date,
-      channelId: pendingMessage.channelId,
+      guildId: options.guildId,
+      channelId: options.channelId,
+      date: options.date,
+      messageId: message.id,
     });
   }
 }
@@ -304,9 +378,15 @@ export async function validateDiscordAccess(
   };
 }
 
-function createActivityMessagePayload(displayName: string) {
+function createActivityMessagePayload(state: ActivityMessageState) {
+  const playerNames = state.players.map((player) => player.displayName);
+  const subject = formatPlayerList(playerNames);
+  const progressLines = state.players
+    .map((player) => `${player.displayName}: ${player.correctGuesses}/4`)
+    .join('\n');
+
   return {
-    content: `${displayName} was playing Connections`,
+    content: `${subject} ${state.players.length === 1 ? 'was' : 'were'} playing Connections (${state.date})\n${progressLines}`,
     allowed_mentions: {
       parse: [],
     },
@@ -327,11 +407,17 @@ function createActivityMessagePayload(displayName: string) {
 }
 
 async function createInteractionFollowup(
-  env: Bindings,
+  env: ActivityMessageEnv,
   interactionToken: string,
   payload: ReturnType<typeof createActivityMessagePayload>,
 ) {
-  const response = await fetch(`${DISCORD_API_BASE_URL}/webhooks/${env.VITE_DISCORD_CLIENT_ID}/${interactionToken}`, {
+  const clientId = env.VITE_DISCORD_CLIENT_ID;
+  if (!clientId) {
+    console.error('Unable to create activity followup message: VITE_DISCORD_CLIENT_ID is not configured');
+    return null;
+  }
+
+  const response = await fetch(`${DISCORD_API_BASE_URL}/webhooks/${clientId}/${interactionToken}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -341,21 +427,107 @@ async function createInteractionFollowup(
 
   if (!response.ok) {
     console.error('Unable to create activity followup message:', response.status, await response.text());
-    return false;
+    return null;
   }
 
+  const message = await response.json<{ id: string }>();
   console.log('activity_message:followup_response_ok', {
     status: response.status,
   });
+  return message;
+}
+
+async function editInteractionFollowup(
+  env: ActivityMessageEnv,
+  interactionToken: string,
+  messageId: string,
+  payload: ReturnType<typeof createActivityMessagePayload>,
+) {
+  const clientId = env.VITE_DISCORD_CLIENT_ID;
+  if (!clientId) {
+    console.error('Unable to edit activity followup message: VITE_DISCORD_CLIENT_ID is not configured');
+    return false;
+  }
+
+  const response = await fetch(
+    `${DISCORD_API_BASE_URL}/webhooks/${clientId}/${interactionToken}/messages/${messageId}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  if (!response.ok) {
+    console.error('Unable to edit activity followup message:', response.status, await response.text());
+    return false;
+  }
+
   return true;
 }
 
-function getPendingActivityLaunchMessageKey(guildId: string) {
-  return `pending-activity-launch-message:${guildId}`;
+function upsertActivityMessagePlayer(
+  previousState: ActivityMessageState | null,
+  options: {
+    guildId: string;
+    channelId: string;
+    date: string;
+    player: ActivityMessagePlayer;
+  },
+  now: number,
+): ActivityMessageState {
+  const previousPlayer = previousState?.players.find((player) => player.userId === options.player.userId);
+  const updatedPlayer = {
+    ...options.player,
+    correctGuesses: Math.max(options.player.correctGuesses, previousPlayer?.correctGuesses ?? 0),
+  };
+  const players = [
+    updatedPlayer,
+    ...(previousState?.players ?? []).filter((player) => player.userId !== options.player.userId),
+  ].sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+  return {
+    guildId: options.guildId,
+    channelId: options.channelId,
+    date: options.date,
+    messageId: previousState?.messageId ?? null,
+    interactionToken: previousState?.interactionToken ?? null,
+    tokenExpiresAt: previousState?.tokenExpiresAt ?? 0,
+    lastUpdatedAt: previousState?.lastUpdatedAt ?? now,
+    players,
+  };
 }
 
-function getSentActivityLaunchMessageKey(guildId: string, date: string) {
-  return `sent-activity-launch-message:${guildId}:${date}`;
+async function putActivityMessageState(
+  env: ActivityMessageEnv,
+  stateKey: string,
+  state: ActivityMessageState,
+) {
+  await env.KV.put(stateKey, JSON.stringify(state), {
+    expirationTtl: MESSAGE_STATE_TTL_SECONDS,
+  });
+}
+
+function getActivityMessageStateKey(guildId: string, channelId: string, date: string) {
+  return `activity-message:${guildId}:${channelId}:${date}`;
+}
+
+function formatPlayerList(names: string[]) {
+  if (names.length === 0) {
+    return 'Someone';
+  }
+
+  if (names.length === 1) {
+    return names[0];
+  }
+
+  if (names.length === 2) {
+    return `${names[0]} and ${names[1]}`;
+  }
+
+  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
 }
 
 function hexToBytes(hex: string) {

@@ -49,6 +49,7 @@ export type ProgressMessage =
 
 export function getProgressWebSocketUrl(
   guildId: string,
+  channelId: string,
   date: string,
   userId: string,
   accessToken: string,
@@ -60,6 +61,7 @@ export function getProgressWebSocketUrl(
     baseUrl.pathname.replace(/\/$/, ''),
     'ws',
     encodeURIComponent(guildId),
+    encodeURIComponent(channelId),
     encodeURIComponent(date),
     encodeURIComponent(userId),
   ].join('/')
