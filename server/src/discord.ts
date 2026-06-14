@@ -59,6 +59,11 @@ type ActivityMessageState = {
   players: ActivityMessagePlayer[];
 };
 
+type ActivityLaunchTokenState = {
+  interactionToken: string;
+  tokenExpiresAt: number;
+};
+
 type ActivityMessageEnv = Pick<Bindings, 'KV' | 'VITE_DISCORD_CLIENT_ID'>;
 
 type DiscordTokenResponse = {
@@ -121,6 +126,7 @@ export async function updateActivityLaunchMessageForInteraction(
   context: InteractionLaunchContext,
   date: string,
 ) {
+  await putLatestActivityLaunchToken(env, context.guildId, context.channelId, interactionToken);
   await updateActivityLaunchMessage(env, {
     guildId: context.guildId,
     channelId: context.channelId,
@@ -143,12 +149,41 @@ export async function updateActivityLaunchMessageForProgress(
   date: string,
   player: ActivityMessagePlayer,
 ) {
-  await updateActivityLaunchMessage(env, {
+  const result = await updateActivityLaunchMessage(env, {
     guildId,
     channelId,
     date,
     player,
     canCreateMessage: false,
+  });
+
+  if (result !== 'needs_interaction') {
+    return;
+  }
+
+  const launchToken = await getLatestActivityLaunchToken(env, guildId, channelId);
+  if (!launchToken || launchToken.tokenExpiresAt <= Date.now()) {
+    console.warn('activity_message:skip_no_current_launch_token', {
+      guildId,
+      channelId,
+      date,
+      hasLaunchToken: Boolean(launchToken),
+    });
+    return;
+  }
+
+  console.log('activity_message:reuse_current_launch_token', {
+    guildId,
+    channelId,
+    date,
+  });
+  await updateActivityLaunchMessage(env, {
+    guildId,
+    channelId,
+    date,
+    player,
+    interactionToken: launchToken.interactionToken,
+    canCreateMessage: true,
   });
 }
 
@@ -162,7 +197,7 @@ async function updateActivityLaunchMessage(
     player: ActivityMessagePlayer;
     canCreateMessage: boolean;
   },
-) {
+): Promise<'updated' | 'needs_interaction' | 'failed'> {
   const stateKey = getActivityMessageStateKey(options.guildId, options.channelId, options.date);
   const now = Date.now();
   const previousState = await env.KV.get<ActivityMessageState>(stateKey, { type: 'json' });
@@ -199,12 +234,12 @@ async function updateActivityLaunchMessage(
         channelId: options.channelId,
         date: options.date,
       });
-      return;
+      return 'updated';
     }
   }
 
   if (!options.canCreateMessage || !options.interactionToken) {
-    console.warn('activity_message:skip_no_fresh_interaction', {
+    console.log('activity_message:needs_fresh_interaction', {
       guildId: options.guildId,
       channelId: options.channelId,
       date: options.date,
@@ -213,7 +248,7 @@ async function updateActivityLaunchMessage(
         : 'missing_or_expired_edit_token',
     });
     await putActivityMessageState(env, stateKey, state);
-    return;
+    return 'needs_interaction';
   }
 
   console.log('activity_message:followup_attempt', {
@@ -242,7 +277,10 @@ async function updateActivityLaunchMessage(
       date: options.date,
       messageId: message.id,
     });
+    return 'updated';
   }
+
+  return 'failed';
 }
 
 export async function verifyDiscordInteractionRequest(request: Request, body: string, publicKey: string) {
@@ -527,8 +565,36 @@ async function putActivityMessageState(
   });
 }
 
+async function putLatestActivityLaunchToken(
+  env: ActivityMessageEnv,
+  guildId: string,
+  channelId: string,
+  interactionToken: string,
+) {
+  await env.KV.put(getLatestActivityLaunchTokenKey(guildId, channelId), JSON.stringify({
+    interactionToken,
+    tokenExpiresAt: Date.now() + INTERACTION_TOKEN_TTL_MS,
+  } satisfies ActivityLaunchTokenState), {
+    expirationTtl: Math.ceil(INTERACTION_TOKEN_TTL_MS / 1000),
+  });
+}
+
+async function getLatestActivityLaunchToken(
+  env: ActivityMessageEnv,
+  guildId: string,
+  channelId: string,
+) {
+  return env.KV.get<ActivityLaunchTokenState>(getLatestActivityLaunchTokenKey(guildId, channelId), {
+    type: 'json',
+  });
+}
+
 function getActivityMessageStateKey(guildId: string, channelId: string, date: string) {
   return `activity-message:${guildId}:${channelId}:${date}`;
+}
+
+function getLatestActivityLaunchTokenKey(guildId: string, channelId: string) {
+  return `activity-launch-token:${guildId}:${channelId}`;
 }
 
 function formatProgressRow(player: ActivityMessagePlayer) {
