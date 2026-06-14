@@ -45,6 +45,7 @@ export type ActivityMessagePlayer = {
   userId: string;
   displayName: string;
   correctGuesses: number;
+  progressCells: Array<number | null>;
 };
 
 type ActivityMessageState = {
@@ -58,9 +59,7 @@ type ActivityMessageState = {
   players: ActivityMessagePlayer[];
 };
 
-type ActivityMessageEnv = Pick<Bindings, 'KV'> & {
-  VITE_DISCORD_CLIENT_ID?: string;
-};
+type ActivityMessageEnv = Pick<Bindings, 'KV' | 'VITE_DISCORD_CLIENT_ID'>;
 
 type DiscordTokenResponse = {
   access_token?: string;
@@ -71,6 +70,11 @@ const DISCORD_API_BASE_URL = 'https://discord.com/api/v10';
 const INTERACTION_TOKEN_TTL_MS = 14 * 60 * 1000;
 const MESSAGE_STALE_AFTER_MS = 60 * 60 * 1000;
 const MESSAGE_STATE_TTL_SECONDS = 60 * 60 * 24 * 4;
+const NAME_COLUMN_WIDTH = 14;
+const MAX_DISPLAY_NAME_LENGTH = NAME_COLUMN_WIDTH - 1;
+const CATEGORY_EMOJIS = ['🟨', '🟩', '🟦', '🟪'] as const;
+const INCORRECT_EMOJI = '⬛';
+const BLANK_EMOJI = '⬜';
 export const INTERACTION_TYPE_PING = 1;
 export const INTERACTION_TYPE_APPLICATION_COMMAND = 2;
 export const INTERACTION_TYPE_MESSAGE_COMPONENT = 3;
@@ -126,6 +130,7 @@ export async function updateActivityLaunchMessageForInteraction(
       userId: context.userId,
       displayName: context.displayName,
       correctGuesses: 0,
+      progressCells: [],
     },
     canCreateMessage: true,
   });
@@ -381,12 +386,10 @@ export async function validateDiscordAccess(
 function createActivityMessagePayload(state: ActivityMessageState) {
   const playerNames = state.players.map((player) => player.displayName);
   const subject = formatPlayerList(playerNames);
-  const progressLines = state.players
-    .map((player) => `${player.displayName}: ${player.correctGuesses}/4`)
-    .join('\n');
+  const progressLines = state.players.map(formatProgressRow).join('\n');
 
   return {
-    content: `${subject} ${state.players.length === 1 ? 'was' : 'were'} playing Connections (${state.date})\n${progressLines}`,
+    content: `${subject} ${state.players.length === 1 ? 'was' : 'were'} playing Connections (${state.date})\n\`\`\`text\n${progressLines}\n\`\`\``,
     allowed_mentions: {
       parse: [],
     },
@@ -479,13 +482,19 @@ function upsertActivityMessagePlayer(
   now: number,
 ): ActivityMessageState {
   const previousPlayer = previousState?.players.find((player) => player.userId === options.player.userId);
+  const hasNewProgress = options.player.progressCells.length > 0 || options.player.correctGuesses > 0;
   const updatedPlayer = {
     ...options.player,
     correctGuesses: Math.max(options.player.correctGuesses, previousPlayer?.correctGuesses ?? 0),
+    progressCells: hasNewProgress
+      ? options.player.progressCells
+      : previousPlayer?.progressCells ?? [],
   };
   const players = [
     updatedPlayer,
-    ...(previousState?.players ?? []).filter((player) => player.userId !== options.player.userId),
+    ...(previousState?.players ?? [])
+      .filter((player) => player.userId !== options.player.userId)
+      .map(normalizeActivityMessagePlayer),
   ].sort((a, b) => a.displayName.localeCompare(b.displayName));
 
   return {
@@ -497,6 +506,14 @@ function upsertActivityMessagePlayer(
     tokenExpiresAt: previousState?.tokenExpiresAt ?? 0,
     lastUpdatedAt: previousState?.lastUpdatedAt ?? now,
     players,
+  };
+}
+
+function normalizeActivityMessagePlayer(player: ActivityMessagePlayer): ActivityMessagePlayer {
+  return {
+    ...player,
+    correctGuesses: player.correctGuesses ?? 0,
+    progressCells: player.progressCells ?? [],
   };
 }
 
@@ -512,6 +529,47 @@ async function putActivityMessageState(
 
 function getActivityMessageStateKey(guildId: string, channelId: string, date: string) {
   return `activity-message:${guildId}:${channelId}:${date}`;
+}
+
+function formatProgressRow(player: ActivityMessagePlayer) {
+  const name = formatPlayerNameForRow(player.displayName);
+  return `${name.padEnd(NAME_COLUMN_WIDTH, ' ')}${formatProgressCells(player)} ${player.correctGuesses}/4`;
+}
+
+function formatPlayerNameForRow(displayName: string) {
+  const sanitizedName = displayName.replace(/[`\\\r\n]/g, ' ').replace(/\s+/g, ' ').trim() || 'Someone';
+
+  if (sanitizedName.length <= MAX_DISPLAY_NAME_LENGTH) {
+    return sanitizedName;
+  }
+
+  return `${sanitizedName.slice(0, MAX_DISPLAY_NAME_LENGTH - 1)}…`;
+}
+
+function formatProgressCells(player: ActivityMessagePlayer) {
+  const progressCells = player.progressCells ?? [];
+  const mistakesMade = progressCells.filter((cell) => cell === null).length;
+  const isFinished = player.correctGuesses >= 4 || mistakesMade >= 4;
+  const visibleCellCount = isFinished
+    ? progressCells.length
+    : Math.min(7, Math.max(4, 4 + mistakesMade, progressCells.length));
+  const cells: string[] = progressCells
+    .slice(0, visibleCellCount)
+    .map(formatProgressCell);
+
+  while (cells.length < visibleCellCount) {
+    cells.push(BLANK_EMOJI);
+  }
+
+  return cells.join('');
+}
+
+function formatProgressCell(cell: number | null) {
+  if (cell === null) {
+    return INCORRECT_EMOJI;
+  }
+
+  return CATEGORY_EMOJIS[cell] ?? INCORRECT_EMOJI;
 }
 
 function formatPlayerList(names: string[]) {

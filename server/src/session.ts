@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { updateActivityLaunchMessageForProgress } from './discord';
-import { countCorrectGuesses, getPuzzleData, type PlayerGuess, type PlayerProgress } from './puzzles';
+import type { Bindings } from './env';
+import { getPuzzleData, summarizeProgressForMessage, type PlayerGuess, type PlayerProgress } from './puzzles';
 
 type PlayerProfile = {
   displayName: string;
@@ -13,14 +14,14 @@ type SocketAttachment = {
   date: string;
 };
 
-export class ProgressRoom extends DurableObject<Env> {
+export class ProgressRoom extends DurableObject<Bindings> {
   sql: SqlStorage;
-  env: Env;
+  env: Bindings;
   users: Map<string, WebSocket>;
   userProgress: Map<string, PlayerProgress>;
   userProfiles: Map<string, PlayerProfile>;
 
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(ctx: DurableObjectState, env: Bindings) {
     // Required, as we're extending the base class.
     super(ctx, env)
     this.env = env;
@@ -287,10 +288,12 @@ export class ProgressRoom extends DurableObject<Env> {
       return;
     }
 
+    const progressSummary = summarizeProgressForMessage(progress, puzzle);
     await updateActivityLaunchMessageForProgress(this.env, guildId, channelId, date, {
       userId,
       displayName: this.userProfiles.get(userId)?.displayName ?? 'Someone',
-      correctGuesses: countCorrectGuesses(progress, puzzle),
+      correctGuesses: progressSummary.correctGuesses,
+      progressCells: progressSummary.progressCells,
     });
   }
 }
