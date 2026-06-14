@@ -125,8 +125,14 @@ export async function updateActivityLaunchMessageForInteraction(
   interactionToken: string,
   context: InteractionLaunchContext,
   date: string,
+  followupDelayMs = 0,
 ) {
   await putLatestActivityLaunchToken(env, context.guildId, context.channelId, interactionToken);
+
+  if (followupDelayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, followupDelayMs));
+  }
+
   await updateActivityLaunchMessage(env, {
     guildId: context.guildId,
     channelId: context.channelId,
@@ -168,6 +174,7 @@ export async function updateActivityLaunchMessageForProgress(
       channelId,
       date,
       hasLaunchToken: Boolean(launchToken),
+      expiredByMs: launchToken ? Date.now() - launchToken.tokenExpiresAt : null,
     });
     return;
   }
@@ -576,6 +583,11 @@ async function putLatestActivityLaunchToken(
     tokenExpiresAt: Date.now() + INTERACTION_TOKEN_TTL_MS,
   } satisfies ActivityLaunchTokenState), {
     expirationTtl: Math.ceil(INTERACTION_TOKEN_TTL_MS / 1000),
+  });
+  console.log('activity_message:launch_token_stored', {
+    guildId,
+    channelId,
+    expiresInMs: INTERACTION_TOKEN_TTL_MS,
   });
 }
 

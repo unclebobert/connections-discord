@@ -67,10 +67,13 @@ function handleActivityLaunchInteraction(c: Context<{ Bindings: Bindings }>, int
   }
 
   const date = getCurrentPuzzleDate();
-  c.executionCtx.waitUntil((async () => {
-    await new Promise((resolve) => setTimeout(resolve, FOLLOWUP_SEND_DELAY_MS));
-    await updateActivityLaunchMessageForInteraction(c.env, interaction.token, launchContext, date);
-  })());
+  c.executionCtx.waitUntil(updateActivityLaunchMessageForInteraction(
+    c.env,
+    interaction.token,
+    launchContext,
+    date,
+    FOLLOWUP_SEND_DELAY_MS,
+  ));
   console.log('interaction:launch_activity', {
     guildId: launchContext.guildId,
     channelId: launchContext.channelId,
@@ -87,10 +90,13 @@ function handleActivityEntryPointInteraction(c: Context<{ Bindings: Bindings }>,
   }
 
   const date = getCurrentPuzzleDate();
-  c.executionCtx.waitUntil((async () => {
-    await new Promise((resolve) => setTimeout(resolve, FOLLOWUP_SEND_DELAY_MS));
-    await updateActivityLaunchMessageForInteraction(c.env, interaction.token, launchContext, date);
-  })());
+  c.executionCtx.waitUntil(updateActivityLaunchMessageForInteraction(
+    c.env,
+    interaction.token,
+    launchContext,
+    date,
+    FOLLOWUP_SEND_DELAY_MS,
+  ));
   console.log('interaction:entrypoint_launch_activity', {
     guildId: launchContext.guildId,
     channelId: launchContext.channelId,
