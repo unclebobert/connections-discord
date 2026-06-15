@@ -1,5 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
-import { updateActivityLaunchMessageForProgress } from './discord';
+import {
+  INTERACTION_TOKEN_TTL_MS,
+  sendActivityLaunchMessage,
+  type ActivityLaunchTokenState,
+  type ActivityMessageMetadata,
+  type ActivityMessagePlayer,
+} from './discord';
 import type { Bindings } from './env';
 import { getPuzzleData, summarizeProgressForMessage, type PlayerGuess, type PlayerProgress } from './puzzles';
 
@@ -12,6 +18,16 @@ type SocketAttachment = {
   guildId: string;
   channelId: string;
   date: string;
+};
+type ActivityInteractionRequest = {
+  interactionToken: string;
+  guildId: string;
+  channelId: string;
+  date: string;
+  userId: string;
+  displayName: string;
+  avatarUrl: string | null;
+  followupDelayMs?: number;
 };
 
 export class ProgressRoom extends DurableObject<Bindings> {
@@ -49,6 +65,22 @@ export class ProgressRoom extends DurableObject<Bindings> {
         avatar_url TEXT
       );
     `)
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS activity_messages (
+        channel_id TEXT NOT NULL PRIMARY KEY,
+        message_id TEXT,
+        interaction_token TEXT,
+        token_expires_at INTEGER NOT NULL,
+        last_updated_at INTEGER NOT NULL
+      );
+    `)
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS launch_tokens (
+        channel_id TEXT NOT NULL PRIMARY KEY,
+        interaction_token TEXT NOT NULL,
+        token_expires_at INTEGER NOT NULL
+      );
+    `)
 
     const cursor = this.sql.exec(`
       SELECT * FROM progress;
@@ -84,6 +116,11 @@ export class ProgressRoom extends DurableObject<Bindings> {
   }
 
   async fetch(request: Request) {
+    const url = new URL(request.url);
+    if (url.pathname === '/activity/interaction' && request.method === 'POST') {
+      return this.handleActivityInteraction(request);
+    }
+
     const upgradeHeader = request.headers.get('Upgrade');
     if (!upgradeHeader || upgradeHeader !== 'websocket') {
       return new Response('ProgressRoom expected Upgrade: websocket', {
@@ -125,6 +162,31 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
   }
 
+  async handleActivityInteraction(request: Request) {
+    const body = await request.json<ActivityInteractionRequest>().catch(() => null);
+    if (!isActivityInteractionRequest(body)) {
+      return new Response('Invalid activity interaction payload', {
+        status: 400,
+      });
+    }
+
+    this.saveLatestActivityLaunchToken(body.guildId, body.channelId, body.interactionToken);
+    this.saveProfile(body.userId, {
+      displayName: body.displayName,
+      avatarUrl: body.avatarUrl,
+    });
+    this.ensurePlayerProgress(body.userId);
+
+    if (body.followupDelayMs && body.followupDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, body.followupDelayMs));
+    }
+
+    await this.updateActivityMessage(body.guildId, body.channelId, body.date, body.interactionToken);
+    return new Response(null, {
+      status: 204,
+    });
+  }
+
   async join(userId: string, guildId: string, channelId: string, date: string, profile: PlayerProfile) {
     console.log('progress_room:join', {
       guildId,
@@ -147,6 +209,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     server.serializeAttachment({ userId, guildId, channelId, date } satisfies SocketAttachment);
     this.users.set(userId, server);
     this.saveProfile(userId, profile);
+    this.ensurePlayerProgress(userId);
     await this.updateActivityMessageForPlayer(userId, guildId, channelId, date);
 
     // send initial progress of all users to the newly connected client
@@ -209,6 +272,19 @@ export class ProgressRoom extends DurableObject<Bindings> {
         display_name=excluded.display_name,
         avatar_url=excluded.avatar_url;
     `, userId, profile.displayName, profile.avatarUrl);
+  }
+
+  ensurePlayerProgress(userId: string) {
+    if (this.userProgress.has(userId)) {
+      return;
+    }
+
+    this.userProgress.set(userId, []);
+    this.sql.exec(`
+      INSERT INTO progress (user_id, progress)
+      VALUES (?, ?)
+      ON CONFLICT(user_id) DO NOTHING;
+    `, userId, JSON.stringify([]));
   }
 
   getSocketAttachment(ws: WebSocket): SocketAttachment {
@@ -276,24 +352,191 @@ export class ProgressRoom extends DurableObject<Bindings> {
       return;
     }
 
-    const progress = this.userProgress.get(userId) ?? [];
+    if (!this.userProgress.has(userId)) {
+      return;
+    }
+
+    await this.updateActivityMessage(guildId, channelId, date);
+  }
+
+  async updateActivityMessage(
+    guildId: string,
+    channelId: string,
+    date: string,
+    interactionToken?: string,
+  ) {
     const puzzle = await getPuzzleData(this.env, date);
     if (!puzzle) {
       console.warn('activity_message:skip_missing_puzzle', {
         guildId,
         channelId,
         date,
-        userId,
       });
       return;
     }
 
-    const progressSummary = summarizeProgressForMessage(progress, puzzle);
-    await updateActivityLaunchMessageForProgress(this.env, guildId, channelId, date, {
-      userId,
-      displayName: this.userProfiles.get(userId)?.displayName ?? 'Someone',
-      correctGuesses: progressSummary.correctGuesses,
-      progressCells: progressSummary.progressCells,
+    const players = this.getActivityMessagePlayers(puzzle);
+    if (players.length === 0) {
+      return;
+    }
+
+    let metadata = this.getActivityMessageMetadata(guildId, channelId, date);
+    let result = await sendActivityLaunchMessage(this.env, {
+      guildId,
+      channelId,
+      date,
+      metadata,
+      interactionToken,
+      players,
+      canCreateMessage: Boolean(interactionToken),
+    });
+
+    if (result.result === 'needs_interaction') {
+      const launchToken = this.getLatestActivityLaunchToken(channelId);
+      if (!launchToken || launchToken.tokenExpiresAt <= Date.now()) {
+        console.warn('activity_message:skip_no_current_launch_token', {
+          guildId,
+          channelId,
+          date,
+          hasLaunchToken: Boolean(launchToken),
+          expiredByMs: launchToken ? Date.now() - launchToken.tokenExpiresAt : null,
+        });
+        return;
+      }
+
+      console.log('activity_message:reuse_current_launch_token', {
+        guildId,
+        channelId,
+        date,
+      });
+      metadata = result.metadata;
+      result = await sendActivityLaunchMessage(this.env, {
+        guildId,
+        channelId,
+        date,
+        metadata,
+        interactionToken: launchToken.interactionToken,
+        players,
+        canCreateMessage: true,
+      });
+    }
+
+    if (result.result === 'updated') {
+      this.saveActivityMessageMetadata(result.metadata);
+    }
+  }
+
+  getActivityMessagePlayers(puzzle: NonNullable<Awaited<ReturnType<typeof getPuzzleData>>>): ActivityMessagePlayer[] {
+    return Array.from(this.userProgress.entries())
+      .map(([userId, progress]) => {
+        const progressSummary = summarizeProgressForMessage(progress, puzzle);
+        return {
+          userId,
+          displayName: this.userProfiles.get(userId)?.displayName ?? 'Someone',
+          correctGuesses: progressSummary.correctGuesses,
+          progressCells: progressSummary.progressCells,
+        };
+      })
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  }
+
+  saveLatestActivityLaunchToken(guildId: string, channelId: string, interactionToken: string) {
+    const tokenExpiresAt = Date.now() + INTERACTION_TOKEN_TTL_MS;
+    this.sql.exec(`
+      INSERT INTO launch_tokens (channel_id, interaction_token, token_expires_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(channel_id) DO UPDATE SET
+        interaction_token=excluded.interaction_token,
+        token_expires_at=excluded.token_expires_at;
+    `, channelId, interactionToken, tokenExpiresAt);
+    console.log('activity_message:launch_token_stored', {
+      guildId,
+      channelId,
+      expiresInMs: INTERACTION_TOKEN_TTL_MS,
     });
   }
+
+  getLatestActivityLaunchToken(channelId: string): ActivityLaunchTokenState | null {
+    const token = this.sql.exec<{
+      interaction_token: string;
+      token_expires_at: number;
+    }>(`
+      SELECT interaction_token, token_expires_at
+      FROM launch_tokens
+      WHERE channel_id = ?;
+    `, channelId).toArray()[0];
+
+    if (!token) {
+      return null;
+    }
+
+    return {
+      interactionToken: token.interaction_token,
+      tokenExpiresAt: token.token_expires_at,
+    };
+  }
+
+  getActivityMessageMetadata(guildId: string, channelId: string, date: string): ActivityMessageMetadata | null {
+    const metadata = this.sql.exec<{
+      message_id: string | null;
+      interaction_token: string | null;
+      token_expires_at: number;
+      last_updated_at: number;
+    }>(`
+      SELECT message_id, interaction_token, token_expires_at, last_updated_at
+      FROM activity_messages
+      WHERE channel_id = ?;
+    `, channelId).toArray()[0];
+
+    if (!metadata) {
+      return null;
+    }
+
+    return {
+      guildId,
+      channelId,
+      date,
+      messageId: metadata.message_id,
+      interactionToken: metadata.interaction_token,
+      tokenExpiresAt: metadata.token_expires_at,
+      lastUpdatedAt: metadata.last_updated_at,
+    };
+  }
+
+  saveActivityMessageMetadata(metadata: ActivityMessageMetadata) {
+    this.sql.exec(`
+      INSERT INTO activity_messages (
+        channel_id,
+        message_id,
+        interaction_token,
+        token_expires_at,
+        last_updated_at
+      )
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(channel_id) DO UPDATE SET
+        message_id=excluded.message_id,
+        interaction_token=excluded.interaction_token,
+        token_expires_at=excluded.token_expires_at,
+        last_updated_at=excluded.last_updated_at;
+    `, metadata.channelId, metadata.messageId, metadata.interactionToken, metadata.tokenExpiresAt, metadata.lastUpdatedAt);
+  }
+}
+
+function isActivityInteractionRequest(value: unknown): value is ActivityInteractionRequest {
+  return typeof value === 'object' &&
+    value !== null &&
+    typeof (value as ActivityInteractionRequest).interactionToken === 'string' &&
+    typeof (value as ActivityInteractionRequest).guildId === 'string' &&
+    typeof (value as ActivityInteractionRequest).channelId === 'string' &&
+    typeof (value as ActivityInteractionRequest).date === 'string' &&
+    typeof (value as ActivityInteractionRequest).userId === 'string' &&
+    typeof (value as ActivityInteractionRequest).displayName === 'string' &&
+    (
+      (value as ActivityInteractionRequest).avatarUrl === null ||
+      typeof (value as ActivityInteractionRequest).avatarUrl === 'string'
+    ) &&
+    (
+      (value as ActivityInteractionRequest).followupDelayMs === undefined ||
+      typeof (value as ActivityInteractionRequest).followupDelayMs === 'number'
+    );
 }

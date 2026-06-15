@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import connectionsLogo from './assets/connections.svg'
 import './App.css'
 
-import { discordSessionPromise, type DiscordSession } from './discord'
+import { getDiscordSession, type DiscordSession } from './discord'
 import {
   buildCards,
   buildCardsForSolvedCategories,
@@ -300,9 +300,13 @@ function App() {
   }, [puzzleDate])
 
   useEffect(() => {
+    if (!hasStarted) {
+      return
+    }
+
     let isCancelled = false
 
-    discordSessionPromise
+    getDiscordSession()
       .then((session) => {
         if (!isCancelled) {
           setDiscordSession(session)
@@ -319,7 +323,7 @@ function App() {
     return () => {
       isCancelled = true
     }
-  }, [])
+  }, [hasStarted])
 
   useEffect(() => () => {
     animationTimers.current.forEach((timer) => window.clearTimeout(timer))

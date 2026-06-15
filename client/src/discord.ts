@@ -60,12 +60,18 @@ async function setupDiscordSDK(): Promise<DiscordSession | null> {
   }
 }
 
-export const discordSessionPromise = setupDiscordSDK()
-  .catch((error) => {
-    if (error instanceof Error && error.message === 'Discord SDK is not being used in this environment') {
-      console.log('Dev environment: Discord SDK not initialized')
-      return null
-    }
+let discordSessionPromise: Promise<DiscordSession | null> | null = null
 
-    throw error
-  })
+export function getDiscordSession() {
+  discordSessionPromise ??= setupDiscordSDK()
+    .catch((error) => {
+      if (error instanceof Error && error.message === 'Discord SDK is not being used in this environment') {
+        console.log('Dev environment: Discord SDK not initialized')
+        return null
+      }
+
+      throw error
+    })
+
+  return discordSessionPromise
+}

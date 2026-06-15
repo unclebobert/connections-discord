@@ -39,6 +39,7 @@ export type InteractionLaunchContext = {
   channelId: string;
   userId: string;
   displayName: string;
+  avatarUrl: string | null;
 };
 
 export type ActivityMessagePlayer = {
@@ -59,12 +60,15 @@ type ActivityMessageState = {
   players: ActivityMessagePlayer[];
 };
 
-type ActivityLaunchTokenState = {
+export type ActivityMessageMetadata = Omit<ActivityMessageState, 'players'>;
+
+export type ActivityLaunchTokenState = {
   interactionToken: string;
   tokenExpiresAt: number;
 };
 
-type ActivityMessageEnv = Pick<Bindings, 'KV' | 'VITE_DISCORD_CLIENT_ID'>;
+type ActivityMessageEnv = Pick<Bindings, 'PROGRESS_ROOMS' | 'VITE_DISCORD_CLIENT_ID'>;
+type DiscordApiEnv = Pick<Bindings, 'VITE_DISCORD_CLIENT_ID'>;
 
 type DiscordTokenResponse = {
   access_token?: string;
@@ -72,9 +76,8 @@ type DiscordTokenResponse = {
 };
 
 const DISCORD_API_BASE_URL = 'https://discord.com/api/v10';
-const INTERACTION_TOKEN_TTL_MS = 14 * 60 * 1000;
+export const INTERACTION_TOKEN_TTL_MS = 14 * 60 * 1000;
 const MESSAGE_STALE_AFTER_MS = 60 * 60 * 1000;
-const MESSAGE_STATE_TTL_SECONDS = 60 * 60 * 24 * 4;
 const NAME_COLUMN_WIDTH = 14;
 const MAX_DISPLAY_NAME_LENGTH = NAME_COLUMN_WIDTH - 1;
 const CATEGORY_EMOJIS = ['🟨', '🟩', '🟦', '🟪'] as const;
@@ -113,11 +116,20 @@ export function getInteractionLaunchContext(interaction: DiscordInteraction) {
     channelId,
     userId: user.id,
     displayName: getDiscordDisplayName(user),
+    avatarUrl: getDiscordAvatarUrl(user),
   };
 }
 
 export function getDiscordDisplayName(user: DiscordUser | undefined) {
   return user?.global_name || user?.username || 'Someone';
+}
+
+function getDiscordAvatarUrl(user: DiscordUser | undefined) {
+  if (!user?.id || !user.avatar) {
+    return null;
+  }
+
+  return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=80`;
 }
 
 export async function updateActivityLaunchMessageForInteraction(
@@ -127,93 +139,67 @@ export async function updateActivityLaunchMessageForInteraction(
   date: string,
   followupDelayMs = 0,
 ) {
-  await putLatestActivityLaunchToken(env, context.guildId, context.channelId, interactionToken);
-
-  if (followupDelayMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, followupDelayMs));
-  }
-
-  await updateActivityLaunchMessage(env, {
-    guildId: context.guildId,
-    channelId: context.channelId,
-    date,
-    interactionToken,
-    player: {
+  const room = env.PROGRESS_ROOMS.getByName(`${context.guildId}:${date}`);
+  const response = await room.fetch('https://progress-room/activity/interaction', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      interactionToken,
+      guildId: context.guildId,
+      channelId: context.channelId,
+      date,
       userId: context.userId,
       displayName: context.displayName,
-      correctGuesses: 0,
-      progressCells: [],
-    },
-    canCreateMessage: true,
-  });
-}
-
-export async function updateActivityLaunchMessageForProgress(
-  env: ActivityMessageEnv,
-  guildId: string,
-  channelId: string,
-  date: string,
-  player: ActivityMessagePlayer,
-) {
-  const result = await updateActivityLaunchMessage(env, {
-    guildId,
-    channelId,
-    date,
-    player,
-    canCreateMessage: false,
+      avatarUrl: context.avatarUrl,
+      followupDelayMs,
+    }),
   });
 
-  if (result !== 'needs_interaction') {
-    return;
-  }
-
-  const launchToken = await getLatestActivityLaunchToken(env, guildId, channelId);
-  if (!launchToken || launchToken.tokenExpiresAt <= Date.now()) {
-    console.warn('activity_message:skip_no_current_launch_token', {
-      guildId,
-      channelId,
+  if (!response.ok) {
+    console.error('activity_message:progress_room_interaction_failed', {
+      guildId: context.guildId,
+      channelId: context.channelId,
       date,
-      hasLaunchToken: Boolean(launchToken),
-      expiredByMs: launchToken ? Date.now() - launchToken.tokenExpiresAt : null,
+      status: response.status,
+      body: await response.text(),
     });
-    return;
   }
-
-  console.log('activity_message:reuse_current_launch_token', {
-    guildId,
-    channelId,
-    date,
-  });
-  await updateActivityLaunchMessage(env, {
-    guildId,
-    channelId,
-    date,
-    player,
-    interactionToken: launchToken.interactionToken,
-    canCreateMessage: true,
-  });
 }
 
-async function updateActivityLaunchMessage(
-  env: ActivityMessageEnv,
+export async function sendActivityLaunchMessage(
+  env: DiscordApiEnv,
   options: {
     guildId: string;
     channelId: string;
     date: string;
+    metadata: ActivityMessageMetadata | null;
     interactionToken?: string;
-    player: ActivityMessagePlayer;
+    players: ActivityMessagePlayer[];
     canCreateMessage: boolean;
   },
-): Promise<'updated' | 'needs_interaction' | 'failed'> {
-  const stateKey = getActivityMessageStateKey(options.guildId, options.channelId, options.date);
+): Promise<
+  | { result: 'updated'; metadata: ActivityMessageMetadata }
+  | { result: 'needs_interaction'; metadata: ActivityMessageMetadata | null }
+  | { result: 'failed'; metadata: ActivityMessageMetadata | null }
+> {
   const now = Date.now();
-  const previousState = await env.KV.get<ActivityMessageState>(stateKey, { type: 'json' });
-  const state = upsertActivityMessagePlayer(previousState, options, now);
+  const state = {
+    guildId: options.guildId,
+    channelId: options.channelId,
+    date: options.date,
+    messageId: options.metadata?.messageId ?? null,
+    interactionToken: options.metadata?.interactionToken ?? null,
+    tokenExpiresAt: options.metadata?.tokenExpiresAt ?? 0,
+    lastUpdatedAt: options.metadata?.lastUpdatedAt ?? now,
+    players: options.players.map(normalizeActivityMessagePlayer),
+  } satisfies ActivityMessageState;
   const canEditExistingMessage = Boolean(
     state.messageId &&
     state.interactionToken &&
     state.tokenExpiresAt > now &&
-    now - (previousState?.lastUpdatedAt ?? 0) <= MESSAGE_STALE_AFTER_MS,
+    now - (options.metadata?.lastUpdatedAt ?? 0) <= MESSAGE_STALE_AFTER_MS,
   );
 
   if (canEditExistingMessage) {
@@ -232,16 +218,16 @@ async function updateActivityLaunchMessage(
     );
 
     if (didEdit) {
-      await putActivityMessageState(env, stateKey, {
-        ...state,
+      const metadata = {
+        ...getActivityMessageMetadata(state),
         lastUpdatedAt: now,
-      });
+      };
       console.log('activity_message:edit_sent', {
         guildId: options.guildId,
         channelId: options.channelId,
         date: options.date,
       });
-      return 'updated';
+      return { result: 'updated', metadata };
     }
   }
 
@@ -250,12 +236,11 @@ async function updateActivityLaunchMessage(
       guildId: options.guildId,
       channelId: options.channelId,
       date: options.date,
-      reason: previousState?.lastUpdatedAt && now - previousState.lastUpdatedAt > MESSAGE_STALE_AFTER_MS
+      reason: options.metadata?.lastUpdatedAt && now - options.metadata.lastUpdatedAt > MESSAGE_STALE_AFTER_MS
         ? 'last_update_over_one_hour'
         : 'missing_or_expired_edit_token',
     });
-    await putActivityMessageState(env, stateKey, state);
-    return 'needs_interaction';
+    return { result: 'needs_interaction', metadata: options.metadata };
   }
 
   console.log('activity_message:followup_attempt', {
@@ -271,23 +256,23 @@ async function updateActivityLaunchMessage(
   );
 
   if (message) {
-    await putActivityMessageState(env, stateKey, {
-      ...state,
+    const metadata = {
+      ...getActivityMessageMetadata(state),
       messageId: message.id,
       interactionToken: options.interactionToken,
       tokenExpiresAt: now + INTERACTION_TOKEN_TTL_MS,
       lastUpdatedAt: now,
-    });
+    };
     console.log('activity_message:followup_sent', {
       guildId: options.guildId,
       channelId: options.channelId,
       date: options.date,
       messageId: message.id,
     });
-    return 'updated';
+    return { result: 'updated', metadata };
   }
 
-  return 'failed';
+  return { result: 'failed', metadata: options.metadata };
 }
 
 export async function verifyDiscordInteractionRequest(request: Request, body: string, publicKey: string) {
@@ -455,7 +440,7 @@ function createActivityMessagePayload(state: ActivityMessageState) {
 }
 
 async function createInteractionFollowup(
-  env: ActivityMessageEnv,
+  env: DiscordApiEnv,
   interactionToken: string,
   payload: ReturnType<typeof createActivityMessagePayload>,
 ) {
@@ -486,7 +471,7 @@ async function createInteractionFollowup(
 }
 
 async function editInteractionFollowup(
-  env: ActivityMessageEnv,
+  env: DiscordApiEnv,
   interactionToken: string,
   messageId: string,
   payload: ReturnType<typeof createActivityMessagePayload>,
@@ -516,44 +501,6 @@ async function editInteractionFollowup(
   return true;
 }
 
-function upsertActivityMessagePlayer(
-  previousState: ActivityMessageState | null,
-  options: {
-    guildId: string;
-    channelId: string;
-    date: string;
-    player: ActivityMessagePlayer;
-  },
-  now: number,
-): ActivityMessageState {
-  const previousPlayer = previousState?.players.find((player) => player.userId === options.player.userId);
-  const hasNewProgress = options.player.progressCells.length > 0 || options.player.correctGuesses > 0;
-  const updatedPlayer = {
-    ...options.player,
-    correctGuesses: Math.max(options.player.correctGuesses, previousPlayer?.correctGuesses ?? 0),
-    progressCells: hasNewProgress
-      ? options.player.progressCells
-      : previousPlayer?.progressCells ?? [],
-  };
-  const players = [
-    updatedPlayer,
-    ...(previousState?.players ?? [])
-      .filter((player) => player.userId !== options.player.userId)
-      .map(normalizeActivityMessagePlayer),
-  ].sort((a, b) => a.displayName.localeCompare(b.displayName));
-
-  return {
-    guildId: options.guildId,
-    channelId: options.channelId,
-    date: options.date,
-    messageId: previousState?.messageId ?? null,
-    interactionToken: previousState?.interactionToken ?? null,
-    tokenExpiresAt: previousState?.tokenExpiresAt ?? 0,
-    lastUpdatedAt: previousState?.lastUpdatedAt ?? now,
-    players,
-  };
-}
-
 function normalizeActivityMessagePlayer(player: ActivityMessagePlayer): ActivityMessagePlayer {
   return {
     ...player,
@@ -562,51 +509,16 @@ function normalizeActivityMessagePlayer(player: ActivityMessagePlayer): Activity
   };
 }
 
-async function putActivityMessageState(
-  env: ActivityMessageEnv,
-  stateKey: string,
-  state: ActivityMessageState,
-) {
-  await env.KV.put(stateKey, JSON.stringify(state), {
-    expirationTtl: MESSAGE_STATE_TTL_SECONDS,
-  });
-}
-
-async function putLatestActivityLaunchToken(
-  env: ActivityMessageEnv,
-  guildId: string,
-  channelId: string,
-  interactionToken: string,
-) {
-  await env.KV.put(getLatestActivityLaunchTokenKey(guildId, channelId), JSON.stringify({
-    interactionToken,
-    tokenExpiresAt: Date.now() + INTERACTION_TOKEN_TTL_MS,
-  } satisfies ActivityLaunchTokenState), {
-    expirationTtl: Math.ceil(INTERACTION_TOKEN_TTL_MS / 1000),
-  });
-  console.log('activity_message:launch_token_stored', {
-    guildId,
-    channelId,
-    expiresInMs: INTERACTION_TOKEN_TTL_MS,
-  });
-}
-
-async function getLatestActivityLaunchToken(
-  env: ActivityMessageEnv,
-  guildId: string,
-  channelId: string,
-) {
-  return env.KV.get<ActivityLaunchTokenState>(getLatestActivityLaunchTokenKey(guildId, channelId), {
-    type: 'json',
-  });
-}
-
-function getActivityMessageStateKey(guildId: string, channelId: string, date: string) {
-  return `activity-message:${guildId}:${channelId}:${date}`;
-}
-
-function getLatestActivityLaunchTokenKey(guildId: string, channelId: string) {
-  return `activity-launch-token:${guildId}:${channelId}`;
+function getActivityMessageMetadata(state: ActivityMessageState): ActivityMessageMetadata {
+  return {
+    guildId: state.guildId,
+    channelId: state.channelId,
+    date: state.date,
+    messageId: state.messageId,
+    interactionToken: state.interactionToken,
+    tokenExpiresAt: state.tokenExpiresAt,
+    lastUpdatedAt: state.lastUpdatedAt,
+  };
 }
 
 function formatProgressRow(player: ActivityMessagePlayer) {
