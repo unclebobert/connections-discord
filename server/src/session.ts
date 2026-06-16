@@ -23,11 +23,6 @@ type ActivityInteractionRequest = {
   interactionToken: string;
   guildId: string;
   channelId: string;
-  date: string;
-  userId: string;
-  displayName: string;
-  avatarUrl: string | null;
-  followupDelayMs?: number;
 };
 
 export class ProgressRoom extends DurableObject<Bindings> {
@@ -117,8 +112,12 @@ export class ProgressRoom extends DurableObject<Bindings> {
 
   async fetch(request: Request) {
     const url = new URL(request.url);
-    if (url.pathname === '/activity/interaction' && request.method === 'POST') {
-      return this.handleActivityInteraction(request);
+    if (url.pathname === '/activity/launch-token' && request.method === 'POST') {
+      return this.handleActivityLaunchToken(request);
+    }
+
+    if (url.pathname === '/activity/launch-token' && request.method === 'GET') {
+      return this.handleGetActivityLaunchToken(url);
     }
 
     const upgradeHeader = request.headers.get('Upgrade');
@@ -162,29 +161,30 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
   }
 
-  async handleActivityInteraction(request: Request) {
+  async handleActivityLaunchToken(request: Request) {
     const body = await request.json<ActivityInteractionRequest>().catch(() => null);
     if (!isActivityInteractionRequest(body)) {
-      return new Response('Invalid activity interaction payload', {
+      return new Response('Invalid activity launch token payload', {
         status: 400,
       });
     }
 
     this.saveLatestActivityLaunchToken(body.guildId, body.channelId, body.interactionToken);
-    this.saveProfile(body.userId, {
-      displayName: body.displayName,
-      avatarUrl: body.avatarUrl,
-    });
-    this.ensurePlayerProgress(body.userId);
 
-    if (body.followupDelayMs && body.followupDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, body.followupDelayMs));
-    }
-
-    await this.updateActivityMessage(body.guildId, body.channelId, body.date, body.interactionToken);
     return new Response(null, {
       status: 204,
     });
+  }
+
+  handleGetActivityLaunchToken(url: URL) {
+    const channelId = url.searchParams.get('channelId');
+    if (!channelId) {
+      return new Response('Missing channelId', {
+        status: 400,
+      });
+    }
+
+    return Response.json(this.getStoredActivityLaunchToken(channelId));
   }
 
   async join(userId: string, guildId: string, channelId: string, date: string, profile: PlayerProfile) {
@@ -392,7 +392,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     });
 
     if (result.result === 'needs_interaction') {
-      const launchToken = this.getLatestActivityLaunchToken(channelId);
+      const launchToken = await this.getLatestActivityLaunchToken(guildId, channelId);
       if (!launchToken || launchToken.tokenExpiresAt <= Date.now()) {
         console.warn('activity_message:skip_no_current_launch_token', {
           guildId,
@@ -456,7 +456,26 @@ export class ProgressRoom extends DurableObject<Bindings> {
     });
   }
 
-  getLatestActivityLaunchToken(channelId: string): ActivityLaunchTokenState | null {
+  async getLatestActivityLaunchToken(guildId: string, channelId: string): Promise<ActivityLaunchTokenState | null> {
+    const tokenRoom = this.env.PROGRESS_ROOMS.getByName(getActivityLaunchTokenRoomName(guildId));
+    const response = await tokenRoom.fetch(
+      `https://progress-room/activity/launch-token?channelId=${encodeURIComponent(channelId)}`,
+    );
+
+    if (!response.ok) {
+      console.error('activity_message:get_launch_token_failed', {
+        guildId,
+        channelId,
+        status: response.status,
+        body: await response.text(),
+      });
+      return null;
+    }
+
+    return response.json<ActivityLaunchTokenState | null>();
+  }
+
+  getStoredActivityLaunchToken(channelId: string): ActivityLaunchTokenState | null {
     const token = this.sql.exec<{
       interaction_token: string;
       token_expires_at: number;
@@ -527,16 +546,9 @@ function isActivityInteractionRequest(value: unknown): value is ActivityInteract
     value !== null &&
     typeof (value as ActivityInteractionRequest).interactionToken === 'string' &&
     typeof (value as ActivityInteractionRequest).guildId === 'string' &&
-    typeof (value as ActivityInteractionRequest).channelId === 'string' &&
-    typeof (value as ActivityInteractionRequest).date === 'string' &&
-    typeof (value as ActivityInteractionRequest).userId === 'string' &&
-    typeof (value as ActivityInteractionRequest).displayName === 'string' &&
-    (
-      (value as ActivityInteractionRequest).avatarUrl === null ||
-      typeof (value as ActivityInteractionRequest).avatarUrl === 'string'
-    ) &&
-    (
-      (value as ActivityInteractionRequest).followupDelayMs === undefined ||
-      typeof (value as ActivityInteractionRequest).followupDelayMs === 'number'
-    );
+    typeof (value as ActivityInteractionRequest).channelId === 'string';
+}
+
+function getActivityLaunchTokenRoomName(guildId: string) {
+  return `${guildId}:launch-token`;
 }

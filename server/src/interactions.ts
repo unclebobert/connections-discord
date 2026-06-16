@@ -9,14 +9,11 @@ import {
   INTERACTION_TYPE_APPLICATION_COMMAND,
   INTERACTION_TYPE_MESSAGE_COMPONENT,
   INTERACTION_TYPE_PING,
-  updateActivityLaunchMessageForInteraction,
+  storeActivityLaunchTokenForInteraction,
   verifyDiscordInteractionRequest,
   type DiscordInteraction,
 } from './discord';
 import type { Bindings } from './env';
-import { getCurrentPuzzleDate } from './puzzles';
-
-const FOLLOWUP_SEND_DELAY_MS = 250;
 
 export async function handleDiscordInteraction(c: Context<{ Bindings: Bindings }>) {
   const body = await c.req.text();
@@ -66,18 +63,14 @@ function handleActivityLaunchInteraction(c: Context<{ Bindings: Bindings }>, int
     return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
   }
 
-  const date = getCurrentPuzzleDate();
-  c.executionCtx.waitUntil(updateActivityLaunchMessageForInteraction(
+  c.executionCtx.waitUntil(storeActivityLaunchTokenForInteraction(
     c.env,
     interaction.token,
     launchContext,
-    date,
-    FOLLOWUP_SEND_DELAY_MS,
   ));
   console.log('interaction:launch_activity', {
     guildId: launchContext.guildId,
     channelId: launchContext.channelId,
-    date,
   });
   return c.json({ type: INTERACTION_RESPONSE_LAUNCH_ACTIVITY });
 }
@@ -89,18 +82,14 @@ function handleActivityEntryPointInteraction(c: Context<{ Bindings: Bindings }>,
     return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
   }
 
-  const date = getCurrentPuzzleDate();
-  c.executionCtx.waitUntil(updateActivityLaunchMessageForInteraction(
+  c.executionCtx.waitUntil(storeActivityLaunchTokenForInteraction(
     c.env,
     interaction.token,
     launchContext,
-    date,
-    FOLLOWUP_SEND_DELAY_MS,
   ));
   console.log('interaction:entrypoint_launch_activity', {
     guildId: launchContext.guildId,
     channelId: launchContext.channelId,
-    date,
   });
   return c.json({ type: INTERACTION_RESPONSE_LAUNCH_ACTIVITY });
 }

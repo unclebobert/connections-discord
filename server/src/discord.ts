@@ -132,15 +132,13 @@ function getDiscordAvatarUrl(user: DiscordUser | undefined) {
   return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=80`;
 }
 
-export async function updateActivityLaunchMessageForInteraction(
+export async function storeActivityLaunchTokenForInteraction(
   env: ActivityMessageEnv,
   interactionToken: string,
   context: InteractionLaunchContext,
-  date: string,
-  followupDelayMs = 0,
 ) {
-  const room = env.PROGRESS_ROOMS.getByName(`${context.guildId}:${date}`);
-  const response = await room.fetch('https://progress-room/activity/interaction', {
+  const room = env.PROGRESS_ROOMS.getByName(getActivityLaunchTokenRoomName(context.guildId));
+  const response = await room.fetch('https://progress-room/activity/launch-token', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -149,19 +147,13 @@ export async function updateActivityLaunchMessageForInteraction(
       interactionToken,
       guildId: context.guildId,
       channelId: context.channelId,
-      date,
-      userId: context.userId,
-      displayName: context.displayName,
-      avatarUrl: context.avatarUrl,
-      followupDelayMs,
     }),
   });
 
   if (!response.ok) {
-    console.error('activity_message:progress_room_interaction_failed', {
+    console.error('activity_message:store_launch_token_failed', {
       guildId: context.guildId,
       channelId: context.channelId,
-      date,
       status: response.status,
       body: await response.text(),
     });
@@ -419,7 +411,7 @@ function createActivityMessagePayload(state: ActivityMessageState) {
   const progressLines = state.players.map(formatProgressRow).join('\n');
 
   return {
-    content: `${subject} ${state.players.length === 1 ? 'was' : 'were'} playing Connections (${state.date})\n\`\`\`text\n${progressLines}\n\`\`\``,
+    content: `${subject} ${state.players.length === 1 ? 'was' : 'were'} playing Connections\n\`\`\`text\n${progressLines}\n\`\`\``,
     allowed_mentions: {
       parse: [],
     },
@@ -519,6 +511,10 @@ function getActivityMessageMetadata(state: ActivityMessageState): ActivityMessag
     tokenExpiresAt: state.tokenExpiresAt,
     lastUpdatedAt: state.lastUpdatedAt,
   };
+}
+
+function getActivityLaunchTokenRoomName(guildId: string) {
+  return `${guildId}:launch-token`;
 }
 
 function formatProgressRow(player: ActivityMessagePlayer) {
