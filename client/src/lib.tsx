@@ -27,6 +27,8 @@ export interface PlayerProfile {
 }
 
 export interface ProgressGuessMessage {
+  type: 'guess'
+  messageId: string
   userId: string
   guess: PlayerGuess
 }
@@ -44,6 +46,11 @@ export type ProgressMessage =
     }
   | {
       type: 'update'
+      player: ProgressUpdateMessage
+    }
+  | {
+      type: 'ack'
+      messageId: string
       player: ProgressUpdateMessage
     }
 
@@ -72,8 +79,13 @@ export function getProgressWebSocketUrl(
   return baseUrl.toString()
 }
 
-export function createProgressGuessMessage(userId: string, guess: PlayerGuess): ProgressGuessMessage {
-  return { userId, guess }
+export function createProgressGuessMessage(userId: string, messageId: string, guess: PlayerGuess): ProgressGuessMessage {
+  return {
+    type: 'guess',
+    messageId,
+    userId,
+    guess,
+  }
 }
 
 export function parseProgressMessage(data: string): ProgressMessage | null {
@@ -88,7 +100,15 @@ export function parseProgressMessage(data: string): ProgressMessage | null {
     }
 
     if (!isProgressUpdateMessage(parsed)) {
-      return null
+      if (!isProgressAckMessage(parsed)) {
+        return null
+      }
+
+      return {
+        type: 'ack',
+        messageId: parsed.messageId,
+        player: parsed.player,
+      }
     }
 
     return {
@@ -98,6 +118,13 @@ export function parseProgressMessage(data: string): ProgressMessage | null {
   } catch {
     return null
   }
+}
+
+function isProgressAckMessage(value: unknown): value is { messageId: string; player: ProgressUpdateMessage } {
+  return isRecord(value) &&
+    value.type === 'ack' &&
+    typeof value.messageId === 'string' &&
+    isProgressUpdateMessage(value.player)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

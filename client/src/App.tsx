@@ -53,6 +53,11 @@ const SOLVED_GROUP_ENTER_Y = 10
 const TITLE_ENTER_Y = 10
 const TOTAL_CATEGORIES = 4
 const PROGRESS_RESTORE_TIMEOUT_MS = 8000
+const PROGRESS_SAVE_WARNING_TIMEOUT_MS = 6000
+const PROGRESS_SAVE_WARNING_TOAST_MS = 3000
+const PROGRESS_RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000]
+const PENDING_PROGRESS_QUEUE_KEY_PREFIX = 'connections:pending-progress:'
+const MAX_PENDING_PROGRESS_GUESSES = 12
 
 type GuessAnimation = 'correct' | 'incorrect'
 type GuessPhase = 'idle' | 'jump' | 'shake' | 'swap'
@@ -72,27 +77,97 @@ interface ProgressState {
 }
 
 type ProgressPlayer = ObservedProgress & ProgressSummary
+type PendingProgressGuess = {
+  id: string
+  guess: PlayerGuess
+  isFinal: boolean
+}
 
 function flushProgressQueue(
   socket: WebSocket,
   userId: string,
-  pendingGuesses: { current: PlayerGuess[] },
+  pendingGuesses: { current: PendingProgressGuess[] },
+  sentGuessIds: { current: Set<string> },
 ) {
-  while (socket.readyState === WebSocket.OPEN && pendingGuesses.current.length > 0) {
-    const guess = pendingGuesses.current.shift()
-
-    if (!guess) {
+  for (const pendingGuess of pendingGuesses.current) {
+    if (socket.readyState !== WebSocket.OPEN) {
       return
     }
 
+    if (sentGuessIds.current.has(pendingGuess.id)) {
+      continue
+    }
+
     try {
-      socket.send(JSON.stringify(createProgressGuessMessage(userId, guess)))
+      socket.send(JSON.stringify(createProgressGuessMessage(userId, pendingGuess.id, pendingGuess.guess)))
+      sentGuessIds.current.add(pendingGuess.id)
     } catch (error) {
-      pendingGuesses.current.unshift(guess)
+      sentGuessIds.current.delete(pendingGuess.id)
       console.error('Unable to send progress update:', error)
       return
     }
   }
+}
+
+function createProgressGuessId() {
+  if (typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
+function getPendingProgressQueueKey(connectionKey: string) {
+  return `${PENDING_PROGRESS_QUEUE_KEY_PREFIX}${connectionKey}`
+}
+
+function loadPendingProgressGuesses(connectionKey: string): PendingProgressGuess[] {
+  try {
+    const rawValue = localStorage.getItem(getPendingProgressQueueKey(connectionKey))
+    if (!rawValue) {
+      return []
+    }
+
+    const parsed: unknown = JSON.parse(rawValue)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    return parsed.filter(isPendingProgressGuess).slice(0, MAX_PENDING_PROGRESS_GUESSES)
+  } catch (error) {
+    console.warn('Unable to load pending progress updates:', error)
+    return []
+  }
+}
+
+function savePendingProgressGuesses(connectionKey: string, pendingGuesses: PendingProgressGuess[]) {
+  try {
+    const storageKey = getPendingProgressQueueKey(connectionKey)
+    if (pendingGuesses.length === 0) {
+      localStorage.removeItem(storageKey)
+      return
+    }
+
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify(pendingGuesses.slice(-MAX_PENDING_PROGRESS_GUESSES)),
+    )
+  } catch (error) {
+    console.warn('Unable to save pending progress updates:', error)
+  }
+}
+
+function isPendingProgressGuess(value: unknown): value is PendingProgressGuess {
+  return typeof value === 'object' &&
+    value !== null &&
+    'id' in value &&
+    'guess' in value &&
+    'isFinal' in value &&
+    typeof value.id === 'string' &&
+    Array.isArray(value.guess) &&
+    value.guess.length === 4 &&
+    value.guess.every((position) => Number.isInteger(position)) &&
+    typeof value.isFinal === 'boolean'
 }
 
 function upsertObservedProgress(
@@ -245,8 +320,11 @@ function App() {
   } | null>(null)
   const animationTimers = useRef<number[]>([])
   const toastTimer = useRef<number | null>(null)
+  const progressSaveWarningTimer = useRef<number | null>(null)
   const progressSocket = useRef<WebSocket | null>(null)
-  const pendingProgressGuesses = useRef<PlayerGuess[]>([])
+  const ensureProgressSocket = useRef<(() => void) | null>(null)
+  const pendingProgressGuesses = useRef<PendingProgressGuess[]>([])
+  const sentProgressGuessIds = useRef<Set<string>>(new Set())
   const hasReportedFinalGuess = useRef(false)
   const hydratedProgressKey = useRef<string | null>(null)
   const puzzleDate = useMemo(() => formatPuzzleDate(new Date()), [])
@@ -339,6 +417,10 @@ function App() {
       window.clearTimeout(toastTimer.current)
     }
 
+    if (progressSaveWarningTimer.current !== null) {
+      window.clearTimeout(progressSaveWarningTimer.current)
+    }
+
     progressSocket.current?.close()
   }, [])
 
@@ -353,91 +435,208 @@ function App() {
       ? `${scopeId}:${channelId}:${userId}:${puzzleDate}`
       : null
 
-    pendingProgressGuesses.current = []
-    hasReportedFinalGuess.current = false
-
     if (!scopeId || !channelId || !userId || !accessToken || !connectionKey) {
+      pendingProgressGuesses.current = []
+      sentProgressGuessIds.current.clear()
+      ensureProgressSocket.current = null
+      hasReportedFinalGuess.current = false
       return
     }
 
-    const socket = new WebSocket(getProgressWebSocketUrl(scopeId, channelId, puzzleDate, userId, accessToken))
+    const activeScopeId = scopeId
+    const activeChannelId = channelId
+    const activeUserId = userId
+    const activeAccessToken = accessToken
+    const activeConnectionKey = connectionKey
+
+    pendingProgressGuesses.current = loadPendingProgressGuesses(activeConnectionKey)
+    sentProgressGuessIds.current.clear()
+    hasReportedFinalGuess.current = pendingProgressGuesses.current.some((pendingGuess) => pendingGuess.isFinal)
+
+    let socket: WebSocket | null = null
     let hasReceivedSnapshot = false
+    let reconnectAttempt = 0
+    let reconnectTimer: number | null = null
+    let isCancelled = false
     const restoreTimeout = window.setTimeout(() => {
       if (!hasReceivedSnapshot) {
         setProgressRestore({
-          connectionKey,
+          connectionKey: activeConnectionKey,
           status: 'unavailable',
         })
       }
     }, PROGRESS_RESTORE_TIMEOUT_MS)
 
-    progressSocket.current = socket
+    function acknowledgeProgressGuess(messageId: string) {
+      const previousLength = pendingProgressGuesses.current.length
+      pendingProgressGuesses.current = pendingProgressGuesses.current.filter((pendingGuess) => pendingGuess.id !== messageId)
+      sentProgressGuessIds.current.delete(messageId)
 
-    socket.addEventListener('open', () => {
-      flushProgressQueue(socket, userId, pendingProgressGuesses)
-    })
-    socket.addEventListener('close', () => {
-      if (!hasReceivedSnapshot) {
-        window.clearTimeout(restoreTimeout)
-        setProgressRestore({
-          connectionKey,
-          status: 'unavailable',
-        })
+      if (pendingProgressGuesses.current.length !== previousLength) {
+        savePendingProgressGuesses(activeConnectionKey, pendingProgressGuesses.current)
       }
-    })
-    socket.addEventListener('error', () => {
-      if (!hasReceivedSnapshot) {
-        window.clearTimeout(restoreTimeout)
-        setProgressRestore({
-          connectionKey,
-          status: 'unavailable',
-        })
-      }
-    })
-    socket.addEventListener('message', (event) => {
-      const message = parseProgressMessage(String(event.data))
 
-      if (!message) {
+      if (pendingProgressGuesses.current.length === 0 && progressSaveWarningTimer.current !== null) {
+        window.clearTimeout(progressSaveWarningTimer.current)
+        progressSaveWarningTimer.current = null
+      }
+    }
+
+    function scheduleReconnect() {
+      if (isCancelled || reconnectTimer !== null) {
         return
       }
 
-      if (message.type === 'snapshot') {
-        hasReceivedSnapshot = true
-        window.clearTimeout(restoreTimeout)
-        setOwnSnapshotProgress({
-          connectionKey,
-          progress: message.players.find((player) => player.userId === userId)?.progress ?? [],
-        })
-        setProgressRestore({
-          connectionKey,
-          status: 'ready',
-        })
+      const delay = PROGRESS_RECONNECT_DELAYS_MS[Math.min(
+        reconnectAttempt,
+        PROGRESS_RECONNECT_DELAYS_MS.length - 1,
+      )]
+      reconnectAttempt += 1
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null
+        connectProgressSocket()
+      }, delay)
+    }
+
+    function markRestoreUnavailable() {
+      if (hasReceivedSnapshot) {
+        return
       }
 
-      setProgressState((currentState) => ({
-        connectionKey,
-        players: message.type === 'snapshot'
-          ? upsertObservedProgressBatch([], message.players)
-          : message.player.userId === userId
-            ? currentState.connectionKey === connectionKey
-              ? currentState.players
-              : []
+      window.clearTimeout(restoreTimeout)
+      setProgressRestore({
+        connectionKey: activeConnectionKey,
+        status: 'unavailable',
+      })
+    }
+
+    function connectProgressSocket() {
+      if (isCancelled) {
+        return
+      }
+
+      const nextSocket = new WebSocket(getProgressWebSocketUrl(
+        activeScopeId,
+        activeChannelId,
+        puzzleDate,
+        activeUserId,
+        activeAccessToken,
+      ))
+      socket = nextSocket
+      sentProgressGuessIds.current.clear()
+      progressSocket.current = nextSocket
+
+      nextSocket.addEventListener('open', () => {
+        reconnectAttempt = 0
+        flushProgressQueue(nextSocket, activeUserId, pendingProgressGuesses, sentProgressGuessIds)
+      })
+      nextSocket.addEventListener('close', (event) => {
+        const isCurrentSocket = progressSocket.current === nextSocket
+        if (isCurrentSocket) {
+          progressSocket.current = null
+        }
+
+        console.warn('Progress socket closed:', {
+          code: event.code,
+          reason: event.reason,
+          wasClean: event.wasClean,
+        })
+        if (!isCurrentSocket) {
+          return
+        }
+
+        markRestoreUnavailable()
+        scheduleReconnect()
+      })
+      nextSocket.addEventListener('error', () => {
+        console.warn('Progress socket error')
+        if (progressSocket.current !== nextSocket) {
+          return
+        }
+
+        markRestoreUnavailable()
+      })
+      nextSocket.addEventListener('message', (event) => {
+        const message = parseProgressMessage(String(event.data))
+
+        if (!message) {
+          return
+        }
+
+        if (message.type === 'snapshot') {
+          hasReceivedSnapshot = true
+          window.clearTimeout(restoreTimeout)
+          setOwnSnapshotProgress({
+            connectionKey: activeConnectionKey,
+            progress: message.players.find((player) => player.userId === activeUserId)?.progress ?? [],
+          })
+          setProgressRestore({
+            connectionKey: activeConnectionKey,
+            status: 'ready',
+          })
+        }
+
+        if (message.type === 'ack') {
+          acknowledgeProgressGuess(message.messageId)
+        }
+
+        setProgressState((currentState) => ({
+          connectionKey: activeConnectionKey,
+          players: message.type === 'snapshot'
+            ? upsertObservedProgressBatch([], message.players)
             : upsertObservedProgress(
-                currentState.connectionKey === connectionKey ? currentState.players : [],
+                currentState.connectionKey === activeConnectionKey ? currentState.players : [],
                 message.player.userId,
                 message.player.progress,
                 message.player.profile ?? null,
               ),
-      }))
-    })
+        }))
+      })
+    }
+
+    function ensureProgressSocketIsOpen() {
+      const currentSocket = progressSocket.current
+      if (currentSocket?.readyState === WebSocket.OPEN) {
+        flushProgressQueue(currentSocket, activeUserId, pendingProgressGuesses, sentProgressGuessIds)
+        return
+      }
+
+      if (currentSocket?.readyState === WebSocket.CONNECTING) {
+        return
+      }
+
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+
+      connectProgressSocket()
+    }
+
+    ensureProgressSocket.current = ensureProgressSocketIsOpen
+    connectProgressSocket()
 
     return () => {
+      isCancelled = true
+      if (ensureProgressSocket.current === ensureProgressSocketIsOpen) {
+        ensureProgressSocket.current = null
+      }
+
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer)
+      }
+
+      if (progressSaveWarningTimer.current !== null) {
+        window.clearTimeout(progressSaveWarningTimer.current)
+        progressSaveWarningTimer.current = null
+      }
+
       if (progressSocket.current === socket) {
         progressSocket.current = null
       }
 
       window.clearTimeout(restoreTimeout)
-      socket.close()
+      socket?.close()
     }
   }, [discordSession?.accessToken, discordSession?.channelId, discordSession?.guildId, discordSession?.user.id, puzzleDate])
 
@@ -510,7 +709,9 @@ function App() {
     const summary = summarizeProgress(ownSnapshotProgress.progress, data.categories)
 
     hydratedProgressKey.current = progressConnectionKey
-    hasReportedFinalGuess.current = summary.isWon || summary.isGameOver
+    hasReportedFinalGuess.current = summary.isWon ||
+      summary.isGameOver ||
+      pendingProgressGuesses.current.some((pendingGuess) => pendingGuess.isFinal)
     setSelectedIds([])
     setSubmittedGuesses(ownSnapshotProgress.progress)
     setSolvedCategories(summary.solvedCategories)
@@ -533,7 +734,7 @@ function App() {
     animationTimers.current.push(timer)
   }
 
-  function showToast(text: string) {
+  function showToast(text: string, duration = TOAST_MS) {
     if (toastTimer.current !== null) {
       window.clearTimeout(toastTimer.current)
     }
@@ -541,7 +742,23 @@ function App() {
     setToast({ id: Date.now(), text })
     toastTimer.current = window.setTimeout(() => {
       setToast(null)
-    }, TOAST_MS)
+    }, duration)
+  }
+
+  function scheduleProgressSaveWarning() {
+    if (pendingProgressGuesses.current.length === 0 || progressSaveWarningTimer.current !== null) {
+      return
+    }
+
+    progressSaveWarningTimer.current = window.setTimeout(() => {
+      progressSaveWarningTimer.current = null
+      if (pendingProgressGuesses.current.length === 0) {
+        return
+      }
+
+      showToast('Progress connection lost. Retrying...', PROGRESS_SAVE_WARNING_TOAST_MS)
+      ensureProgressSocket.current?.()
+    }, PROGRESS_SAVE_WARNING_TIMEOUT_MS)
   }
 
   function recordOwnProgressGuess(guess: PlayerGuess) {
@@ -570,12 +787,25 @@ function App() {
       return
     }
 
+    const pendingGuess = {
+      id: createProgressGuessId(),
+      guess,
+      isFinal: isFinalGuess,
+    } satisfies PendingProgressGuess
+
     recordOwnProgressGuess(guess)
-    pendingProgressGuesses.current.push(guess)
+    pendingProgressGuesses.current = [
+      ...pendingProgressGuesses.current,
+      pendingGuess,
+    ].slice(-MAX_PENDING_PROGRESS_GUESSES)
+    savePendingProgressGuesses(progressConnectionKey, pendingProgressGuesses.current)
 
     if (progressSocket.current?.readyState === WebSocket.OPEN) {
-      flushProgressQueue(progressSocket.current, discordSession.user.id, pendingProgressGuesses)
+      flushProgressQueue(progressSocket.current, discordSession.user.id, pendingProgressGuesses, sentProgressGuessIds)
+    } else {
+      ensureProgressSocket.current?.()
     }
+    scheduleProgressSaveWarning()
 
     if (isFinalGuess) {
       hasReportedFinalGuess.current = true

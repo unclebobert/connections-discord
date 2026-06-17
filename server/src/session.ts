@@ -24,6 +24,10 @@ type ActivityInteractionRequest = {
   scopeId: string;
   channelId: string;
 };
+type ProgressGuessMessage = {
+  messageId?: string;
+  guess: PlayerGuess;
+};
 
 export class ProgressRoom extends DurableObject<Bindings> {
   sql: SqlStorage;
@@ -234,11 +238,10 @@ export class ProgressRoom extends DurableObject<Bindings> {
       return;
     }
     try {
-      const { guess } = JSON.parse(message);
-      if (!(guess instanceof Array)
-        || guess.length !== 4
-        || !guess.every(num => typeof num === 'number')
-      ) {
+      const parsed = JSON.parse(message) as Partial<ProgressGuessMessage>;
+      const { guess } = parsed;
+      const messageId = typeof parsed.messageId === 'string' ? parsed.messageId : null;
+      if (!isPlayerGuess(guess)) {
         console.error('Invalid guess format');
         return;
       }
@@ -248,18 +251,40 @@ export class ProgressRoom extends DurableObject<Bindings> {
         channelId: attachment.channelId,
         date: attachment.date,
         userId: attachment.userId,
+        messageId,
       });
-      await this.saveGuess(attachment, guess as PlayerGuess);
+      const progress = await this.saveGuess(attachment, guess);
+      if (messageId) {
+        this.sendProgressAck(ws, messageId, attachment.userId, progress);
+      }
     } catch (error) {
       console.error('Error parsing guess:', error);
     }
   }
 
-  async webSocketClose(ws: WebSocket) {
+  async webSocketClose(ws: WebSocket, code?: number, reason?: string, wasClean?: boolean) {
+    const attachment = this.getSocketAttachment(ws);
+    console.log('progress_room:socket_close', {
+      scopeId: attachment.scopeId,
+      channelId: attachment.channelId,
+      date: attachment.date,
+      userId: attachment.userId,
+      code: code ?? null,
+      reason: reason ?? null,
+      wasClean: wasClean ?? null,
+    });
     this.removeSocket(ws);
   }
 
-  async webSocketError(ws: WebSocket) {
+  async webSocketError(ws: WebSocket, error?: unknown) {
+    const attachment = this.getSocketAttachment(ws);
+    console.warn('progress_room:socket_error', {
+      scopeId: attachment.scopeId,
+      channelId: attachment.channelId,
+      date: attachment.date,
+      userId: attachment.userId,
+      error: error instanceof Error ? error.message : String(error ?? ''),
+    });
     this.removeSocket(ws);
   }
 
@@ -304,12 +329,21 @@ export class ProgressRoom extends DurableObject<Bindings> {
 
   async saveGuess({ userId, scopeId, channelId, date }: SocketAttachment, newGuess: PlayerGuess) {
     // Update in-memory progress and persist to SQL storage
-    if (this.userProgress.has(userId)) {
-      this.userProgress.get(userId)?.push(newGuess);
-    } else {
-      this.userProgress.set(userId, [newGuess]);
+    const currentProgress = this.userProgress.get(userId) ?? [];
+    const isDuplicateGuess = currentProgress.some((guess) => areSameGuess(guess, newGuess));
+    if (isDuplicateGuess) {
+      console.log('progress:guess_duplicate', {
+        scopeId,
+        channelId,
+        date,
+        userId,
+        guessCount: currentProgress.length,
+      });
+      return currentProgress;
     }
-    const progress = this.userProgress.get(userId)!;
+
+    const progress = [...currentProgress, newGuess];
+    this.userProgress.set(userId, progress);
     this.sql.exec(`
       INSERT INTO progress (user_id, progress)
       VALUES (?, ?)
@@ -344,6 +378,32 @@ export class ProgressRoom extends DurableObject<Bindings> {
         this.users.delete(observerUserId);
         console.error('Error sending progress update:', error);
       }
+    }
+
+    return progress;
+  }
+
+  sendProgressAck(ws: WebSocket, messageId: string, userId: string, progress: PlayerProgress) {
+    if (ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    try {
+      ws.send(JSON.stringify({
+        type: 'ack',
+        messageId,
+        player: {
+          userId,
+          progress,
+          profile: this.userProfiles.get(userId) ?? null,
+        },
+      }));
+    } catch (error) {
+      console.error('progress_room:ack_failed', {
+        userId,
+        messageId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -547,6 +607,20 @@ function isActivityInteractionRequest(value: unknown): value is ActivityInteract
     typeof (value as ActivityInteractionRequest).interactionToken === 'string' &&
     typeof (value as ActivityInteractionRequest).scopeId === 'string' &&
     typeof (value as ActivityInteractionRequest).channelId === 'string';
+}
+
+function isPlayerGuess(value: unknown): value is PlayerGuess {
+  return Array.isArray(value) &&
+    value.length === 4 &&
+    value.every((position) => Number.isInteger(position));
+}
+
+function areSameGuess(left: PlayerGuess, right: PlayerGuess) {
+  return getGuessKey(left) === getGuessKey(right);
+}
+
+function getGuessKey(guess: PlayerGuess) {
+  return [...guess].sort((left, right) => left - right).join(':');
 }
 
 function getActivityLaunchTokenRoomName(scopeId: string) {
