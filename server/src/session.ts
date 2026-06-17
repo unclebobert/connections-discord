@@ -34,6 +34,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
   env: Bindings;
   users: Map<string, WebSocket>;
   userProgress: Map<string, PlayerProgress>;
+  loadedProgressDates: Set<string>;
   userProfiles: Map<string, PlayerProfile>;
 
   constructor(ctx: DurableObjectState, env: Bindings) {
@@ -47,14 +48,16 @@ export class ProgressRoom extends DurableObject<Bindings> {
     this.users = new Map();
     for (const socket of this.ctx.getWebSockets()) {
       const attachment = this.getSocketAttachment(socket);
-      this.users.set(attachment.userId, socket);
+      this.users.set(getSocketKey(attachment.date, attachment.userId), socket);
     }
-    // Repopulate user progress from SQL storage, after hibernation
     this.userProgress = new Map();
+    this.loadedProgressDates = new Set();
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS progress (
-        user_id TEXT NOT NULL PRIMARY KEY,
-        progress JSON NOT NULL
+        date TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        progress JSON NOT NULL,
+        PRIMARY KEY (date, user_id)
       );
     `)
     this.sql.exec(`
@@ -66,11 +69,13 @@ export class ProgressRoom extends DurableObject<Bindings> {
     `)
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS activity_messages (
-        channel_id TEXT NOT NULL PRIMARY KEY,
+        date TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
         message_id TEXT,
         interaction_token TEXT,
         token_expires_at INTEGER NOT NULL,
-        last_updated_at INTEGER NOT NULL
+        last_updated_at INTEGER NOT NULL,
+        PRIMARY KEY (date, channel_id)
       );
     `)
     this.sql.exec(`
@@ -80,16 +85,6 @@ export class ProgressRoom extends DurableObject<Bindings> {
         token_expires_at INTEGER NOT NULL
       );
     `)
-
-    const cursor = this.sql.exec(`
-      SELECT * FROM progress;
-    `)
-    for (const { user_id: userId, progress } of cursor.toArray() as Array<{
-      user_id: string,
-      progress: string, // Stored as JSON string in SQL (?)
-    }>) {
-      this.userProgress.set(userId, JSON.parse(progress));
-    }
 
     this.userProfiles = new Map();
     const profiles = this.sql.exec(`
@@ -109,8 +104,9 @@ export class ProgressRoom extends DurableObject<Bindings> {
 
   removeSocket(ws: WebSocket) {
     const attachment = this.getSocketAttachment(ws);
-    if (this.users.get(attachment.userId) === ws) {
-      this.users.delete(attachment.userId);
+    const socketKey = getSocketKey(attachment.date, attachment.userId);
+    if (this.users.get(socketKey) === ws) {
+      this.users.delete(socketKey);
     }
   }
 
@@ -200,7 +196,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
       hasAvatar: Boolean(profile.avatarUrl),
     });
 
-    const existingSocket = this.users.get(userId);
+    const socketKey = getSocketKey(date, userId);
+    const existingSocket = this.users.get(socketKey);
     if (existingSocket && existingSocket.readyState === WebSocket.OPEN) {
       existingSocket.close(1000, 'New connection established');
     }
@@ -211,13 +208,13 @@ export class ProgressRoom extends DurableObject<Bindings> {
     // use this instead of websocket.accept() since it allows hibernation
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({ userId, scopeId, channelId, date } satisfies SocketAttachment);
-    this.users.set(userId, server);
+    this.users.set(socketKey, server);
     this.saveProfile(userId, profile);
-    this.ensurePlayerProgress(userId);
+    this.ensurePlayerProgress(userId, date);
     await this.updateActivityMessageForPlayer(userId, scopeId, channelId, date);
 
     // send initial progress of all users to the newly connected client
-    const usersProgress = Array.from(this.userProgress.entries())
+    const usersProgress = this.getDateProgress(date)
       .map(([userId, progress]) => ({
         userId,
         progress,
@@ -299,17 +296,38 @@ export class ProgressRoom extends DurableObject<Bindings> {
     `, userId, profile.displayName, profile.avatarUrl);
   }
 
-  ensurePlayerProgress(userId: string) {
-    if (this.userProgress.has(userId)) {
+  loadDateProgress(date: string) {
+    if (this.loadedProgressDates.has(date)) {
       return;
     }
 
-    this.userProgress.set(userId, []);
+    const cursor = this.sql.exec(`
+      SELECT user_id, progress
+      FROM progress
+      WHERE date = ?;
+    `, date);
+    for (const { user_id: userId, progress } of cursor.toArray() as Array<{
+      user_id: string,
+      progress: string,
+    }>) {
+      this.userProgress.set(getProgressKey(date, userId), JSON.parse(progress));
+    }
+    this.loadedProgressDates.add(date);
+  }
+
+  ensurePlayerProgress(userId: string, date: string) {
+    this.loadDateProgress(date);
+    const progressKey = getProgressKey(date, userId);
+    if (this.userProgress.has(progressKey)) {
+      return;
+    }
+
+    this.userProgress.set(progressKey, []);
     this.sql.exec(`
-      INSERT INTO progress (user_id, progress)
-      VALUES (?, ?)
-      ON CONFLICT(user_id) DO NOTHING;
-    `, userId, JSON.stringify([]));
+      INSERT INTO progress (date, user_id, progress)
+      VALUES (?, ?, ?)
+      ON CONFLICT(date, user_id) DO NOTHING;
+    `, date, userId, JSON.stringify([]));
   }
 
   getSocketAttachment(ws: WebSocket): SocketAttachment {
@@ -327,9 +345,19 @@ export class ProgressRoom extends DurableObject<Bindings> {
     return attachment as SocketAttachment;
   }
 
+  getDateProgress(date: string): Array<[string, PlayerProgress]> {
+    this.loadDateProgress(date);
+    const prefix = `${date}:`;
+    return Array.from(this.userProgress.entries())
+      .filter(([progressKey]) => progressKey.startsWith(prefix))
+      .map(([progressKey, progress]) => [progressKey.slice(prefix.length), progress]);
+  }
+
   async saveGuess({ userId, scopeId, channelId, date }: SocketAttachment, newGuess: PlayerGuess) {
     // Update in-memory progress and persist to SQL storage
-    const currentProgress = this.userProgress.get(userId) ?? [];
+    this.loadDateProgress(date);
+    const progressKey = getProgressKey(date, userId);
+    const currentProgress = this.userProgress.get(progressKey) ?? [];
     const isDuplicateGuess = currentProgress.some((guess) => areSameGuess(guess, newGuess));
     if (isDuplicateGuess) {
       console.log('progress:guess_duplicate', {
@@ -343,12 +371,12 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
 
     const progress = [...currentProgress, newGuess];
-    this.userProgress.set(userId, progress);
+    this.userProgress.set(progressKey, progress);
     this.sql.exec(`
-      INSERT INTO progress (user_id, progress)
-      VALUES (?, ?)
-      ON CONFLICT(user_id) DO UPDATE SET progress=excluded.progress;
-    `, userId, JSON.stringify(progress));
+      INSERT INTO progress (date, user_id, progress)
+      VALUES (?, ?, ?)
+      ON CONFLICT(date, user_id) DO UPDATE SET progress=excluded.progress;
+    `, date, userId, JSON.stringify(progress));
 
     console.log('progress:guess_saved', {
       scopeId,
@@ -361,10 +389,12 @@ export class ProgressRoom extends DurableObject<Bindings> {
     await this.updateActivityMessageForPlayer(userId, scopeId, channelId, date);
 
     // Send progress update to all connected clients via websocket
-    for (const [observerUserId, socket] of this.users.entries()) {
-      if (observerUserId === userId) continue; // Don't send progress update to the user who made the update
+    for (const [socketKey, socket] of this.users.entries()) {
+      const attachment = this.getSocketAttachment(socket);
+      if (attachment.date !== date) continue;
+      if (attachment.userId === userId) continue; // Don't send progress update to the user who made the update
       if (socket.readyState !== WebSocket.OPEN) {
-        this.users.delete(observerUserId);
+        this.users.delete(socketKey);
         continue;
       }
 
@@ -375,7 +405,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
           profile: this.userProfiles.get(userId) ?? null,
         }));
       } catch (error) {
-        this.users.delete(observerUserId);
+        this.users.delete(socketKey);
         console.error('Error sending progress update:', error);
       }
     }
@@ -412,7 +442,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       return;
     }
 
-    if (!this.userProgress.has(userId)) {
+    if (!this.userProgress.has(getProgressKey(date, userId))) {
       return;
     }
 
@@ -435,7 +465,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       return;
     }
 
-    const players = this.getActivityMessagePlayers(puzzle);
+    const players = this.getActivityMessagePlayers(date, puzzle);
     if (players.length === 0) {
       return;
     }
@@ -452,7 +482,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     });
 
     if (result.result === 'needs_interaction') {
-      const launchToken = await this.getLatestActivityLaunchToken(scopeId, channelId);
+      const launchToken = this.getLatestActivityLaunchToken(channelId);
       if (!launchToken || launchToken.tokenExpiresAt <= Date.now()) {
         console.warn('activity_message:skip_no_current_launch_token', {
           scopeId,
@@ -486,8 +516,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
   }
 
-  getActivityMessagePlayers(puzzle: NonNullable<Awaited<ReturnType<typeof getPuzzleData>>>): ActivityMessagePlayer[] {
-    return Array.from(this.userProgress.entries())
+  getActivityMessagePlayers(date: string, puzzle: NonNullable<Awaited<ReturnType<typeof getPuzzleData>>>): ActivityMessagePlayer[] {
+    return this.getDateProgress(date)
       .map(([userId, progress]) => {
         const progressSummary = summarizeProgressForMessage(progress, puzzle);
         return {
@@ -516,26 +546,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     });
   }
 
-  async getLatestActivityLaunchToken(scopeId: string, channelId: string): Promise<ActivityLaunchTokenState | null> {
-    const tokenRoom = this.env.PROGRESS_ROOMS.getByName(getActivityLaunchTokenRoomName(scopeId));
-    const response = await tokenRoom.fetch(
-      `https://progress-room/activity/launch-token?channelId=${encodeURIComponent(channelId)}`,
-    );
-
-    if (!response.ok) {
-      console.error('activity_message:get_launch_token_failed', {
-        scopeId,
-        channelId,
-        status: response.status,
-        body: await response.text(),
-      });
-      return null;
-    }
-
-    return response.json<ActivityLaunchTokenState | null>();
-  }
-
-  getStoredActivityLaunchToken(channelId: string): ActivityLaunchTokenState | null {
+  getLatestActivityLaunchToken(channelId: string): ActivityLaunchTokenState | null {
     const token = this.sql.exec<{
       interaction_token: string;
       token_expires_at: number;
@@ -555,6 +566,10 @@ export class ProgressRoom extends DurableObject<Bindings> {
     };
   }
 
+  getStoredActivityLaunchToken(channelId: string): ActivityLaunchTokenState | null {
+    return this.getLatestActivityLaunchToken(channelId);
+  }
+
   getActivityMessageMetadata(scopeId: string, channelId: string, date: string): ActivityMessageMetadata | null {
     const metadata = this.sql.exec<{
       message_id: string | null;
@@ -564,8 +579,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }>(`
       SELECT message_id, interaction_token, token_expires_at, last_updated_at
       FROM activity_messages
-      WHERE channel_id = ?;
-    `, channelId).toArray()[0];
+      WHERE date = ? AND channel_id = ?;
+    `, date, channelId).toArray()[0];
 
     if (!metadata) {
       return null;
@@ -585,19 +600,20 @@ export class ProgressRoom extends DurableObject<Bindings> {
   saveActivityMessageMetadata(metadata: ActivityMessageMetadata) {
     this.sql.exec(`
       INSERT INTO activity_messages (
+        date,
         channel_id,
         message_id,
         interaction_token,
         token_expires_at,
         last_updated_at
       )
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(channel_id) DO UPDATE SET
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(date, channel_id) DO UPDATE SET
         message_id=excluded.message_id,
         interaction_token=excluded.interaction_token,
         token_expires_at=excluded.token_expires_at,
         last_updated_at=excluded.last_updated_at;
-    `, metadata.channelId, metadata.messageId, metadata.interactionToken, metadata.tokenExpiresAt, metadata.lastUpdatedAt);
+    `, metadata.date, metadata.channelId, metadata.messageId, metadata.interactionToken, metadata.tokenExpiresAt, metadata.lastUpdatedAt);
   }
 }
 
@@ -623,6 +639,10 @@ function getGuessKey(guess: PlayerGuess) {
   return [...guess].sort((left, right) => left - right).join(':');
 }
 
-function getActivityLaunchTokenRoomName(scopeId: string) {
-  return `${scopeId}:launch-token`;
+function getProgressKey(date: string, userId: string) {
+  return `${date}:${userId}`;
+}
+
+function getSocketKey(date: string, userId: string) {
+  return getProgressKey(date, userId);
 }

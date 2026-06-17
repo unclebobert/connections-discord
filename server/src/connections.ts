@@ -78,7 +78,7 @@ export function registerConnectionsRoutes(app: App) {
       userId,
     });
 
-    const room = c.env.PROGRESS_ROOMS.getByName(`${scopeId}:${date}`);
+    const room = c.env.PROGRESS_ROOMS.getByName(scopeId);
     const headers = new Headers(c.req.raw.headers);
     headers.set('x-progress-user-id', userId);
     headers.set('x-progress-scope-id', scopeId);

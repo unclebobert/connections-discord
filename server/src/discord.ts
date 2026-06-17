@@ -143,7 +143,7 @@ export async function storeActivityLaunchTokenForInteraction(
   interactionToken: string,
   context: InteractionLaunchContext,
 ) {
-  const room = env.PROGRESS_ROOMS.getByName(getActivityLaunchTokenRoomName(context.scopeId));
+  const room = env.PROGRESS_ROOMS.getByName(context.scopeId);
   const response = await room.fetch('https://progress-room/activity/launch-token', {
     method: 'POST',
     headers: {
@@ -523,10 +523,6 @@ function getActivityMessageMetadata(state: ActivityMessageState): ActivityMessag
     tokenExpiresAt: state.tokenExpiresAt,
     lastUpdatedAt: state.lastUpdatedAt,
   };
-}
-
-function getActivityLaunchTokenRoomName(scopeId: string) {
-  return `${scopeId}:launch-token`;
 }
 
 function formatProgressRow(player: ActivityMessagePlayer) {
