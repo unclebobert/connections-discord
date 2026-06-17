@@ -6,7 +6,7 @@ import type { App } from './env';
 import { getPuzzleData, isValidPuzzleDate } from './puzzles';
 
 export function registerConnectionsRoutes(app: App) {
-  app.get('/ws/:guildId/:channelId/:date/:userId', async (c) => {
+  app.get('/ws/:scopeId/:channelId/:date/:userId', async (c) => {
     const upgradeHeader = c.req.header('Upgrade');
     if (!upgradeHeader || upgradeHeader !== 'websocket') {
       return new Response('Worker expected Upgrade: websocket', {
@@ -14,53 +14,54 @@ export function registerConnectionsRoutes(app: App) {
       });
     }
 
-    const guildId = c.req.param('guildId');
+    const scopeId = c.req.param('scopeId');
     const channelId = c.req.param('channelId');
     const date = c.req.param('date');
     const userId = c.req.param('userId');
     console.log('progress_ws:request', {
-      guildId,
+      scopeId,
       channelId,
       date,
       userId,
     });
 
-    if (!guildId || !channelId || !date || !userId) {
+    if (!scopeId || !channelId || !date || !userId) {
       console.warn('progress_ws:missing_params');
-      return new Response('Missing guildId, channelId, date, or userId', {
+      return new Response('Missing scopeId, channelId, date, or userId', {
         status: 400,
       });
     }
 
     if (!isValidPuzzleDate(date)) {
-      console.warn('progress_ws:invalid_date_format', { guildId, channelId, date, userId });
+      console.warn('progress_ws:invalid_date_format', { scopeId, channelId, date, userId });
       return new Response('Invalid date format', {
         status: 400,
       });
     }
 
     if (isPuzzleDateTooFarFromToday(date)) {
-      console.warn('progress_ws:invalid_date_range', { guildId, channelId, date, userId });
+      console.warn('progress_ws:invalid_date_range', { scopeId, channelId, date, userId });
       return new Response('Invalid date', {
         status: 400,
       });
     }
 
-    if (!isDiscordSnowflake(guildId) || !isDiscordSnowflake(channelId) || !isDiscordSnowflake(userId)) {
-      console.warn('progress_ws:invalid_snowflake', { guildId, channelId, date, userId });
-      return c.json({ error: 'Invalid guild ID, channel ID, or user ID' }, 400);
+    if (!isActivityScopeId(scopeId) || !isDiscordSnowflake(channelId) || !isDiscordSnowflake(userId)) {
+      console.warn('progress_ws:invalid_scope_or_snowflake', { scopeId, channelId, date, userId });
+      return c.json({ error: 'Invalid scope ID, channel ID, or user ID' }, 400);
     }
 
     const accessToken = c.req.query('access_token');
     if (!accessToken) {
-      console.warn('progress_ws:missing_access_token', { guildId, channelId, date, userId });
+      console.warn('progress_ws:missing_access_token', { scopeId, channelId, date, userId });
       return c.json({ error: 'Missing access token' }, 401);
     }
 
-    const authResult = await validateDiscordAccess(accessToken, userId, guildId);
+    const expectedGuildId = getGuildIdFromActivityScope(scopeId);
+    const authResult = await validateDiscordAccess(accessToken, userId, expectedGuildId);
     if (!authResult.ok) {
       console.warn('progress_ws:auth_failed', {
-        guildId,
+        scopeId,
         channelId,
         date,
         userId,
@@ -71,16 +72,16 @@ export function registerConnectionsRoutes(app: App) {
     }
 
     console.log('progress_ws:auth_ok', {
-      guildId,
+      scopeId,
       channelId,
       date,
       userId,
     });
 
-    const room = c.env.PROGRESS_ROOMS.getByName(`${guildId}:${date}`);
+    const room = c.env.PROGRESS_ROOMS.getByName(`${scopeId}:${date}`);
     const headers = new Headers(c.req.raw.headers);
     headers.set('x-progress-user-id', userId);
-    headers.set('x-progress-guild-id', guildId);
+    headers.set('x-progress-scope-id', scopeId);
     headers.set('x-progress-channel-id', channelId);
     headers.set('x-progress-date', date);
     headers.set('x-progress-profile', encodeURIComponent(JSON.stringify(authResult.profile)));
@@ -125,4 +126,22 @@ function isPuzzleDateTooFarFromToday(date: string) {
 
 function isDiscordSnowflake(value: string) {
   return /^\d{12,24}$/.test(value);
+}
+
+function isActivityScopeId(value: string) {
+  const parts = value.split(':');
+  if (parts.length !== 2) {
+    return false;
+  }
+
+  const [scopeType, id] = parts;
+  return (
+    (scopeType === 'guild' || scopeType === 'dm') &&
+    Boolean(id) &&
+    isDiscordSnowflake(id)
+  );
+}
+
+function getGuildIdFromActivityScope(scopeId: string) {
+  return scopeId.startsWith('guild:') ? scopeId.slice('guild:'.length) : null;
 }

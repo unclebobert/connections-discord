@@ -60,7 +60,7 @@ function handleActivityLaunchInteraction(c: Context<{ Bindings: Bindings }>, int
   const launchContext = getInteractionLaunchContext(interaction);
   if (!launchContext) {
     console.warn('interaction:launch_missing_context');
-    return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
+    return c.json(createEphemeralInteractionMessage('Connections can only be launched from a Discord channel.'));
   }
 
   c.executionCtx.waitUntil(storeActivityLaunchTokenForInteraction(
@@ -79,7 +79,7 @@ function handleActivityEntryPointInteraction(c: Context<{ Bindings: Bindings }>,
   const launchContext = getInteractionLaunchContext(interaction);
   if (!launchContext) {
     console.warn('interaction:entrypoint_missing_context');
-    return c.json(createEphemeralInteractionMessage('Connections can only be launched from a server channel.'));
+    return c.json(createEphemeralInteractionMessage('Connections can only be launched from a Discord channel.'));
   }
 
   c.executionCtx.waitUntil(storeActivityLaunchTokenForInteraction(

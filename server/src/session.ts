@@ -15,13 +15,13 @@ type PlayerProfile = {
 };
 type SocketAttachment = {
   userId: string;
-  guildId: string;
+  scopeId: string;
   channelId: string;
   date: string;
 };
 type ActivityInteractionRequest = {
   interactionToken: string;
-  guildId: string;
+  scopeId: string;
   channelId: string;
 };
 
@@ -128,14 +128,14 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
 
     const userId = request.headers.get('x-progress-user-id');
-    const guildId = request.headers.get('x-progress-guild-id');
+    const scopeId = request.headers.get('x-progress-scope-id');
     const channelId = request.headers.get('x-progress-channel-id');
     const date = request.headers.get('x-progress-date');
     const encodedProfile = request.headers.get('x-progress-profile');
-    if (!userId || !guildId || !channelId || !date || !encodedProfile) {
+    if (!userId || !scopeId || !channelId || !date || !encodedProfile) {
       console.warn('progress_room:missing_authenticated_user', {
         hasUserId: Boolean(userId),
-        hasGuildId: Boolean(guildId),
+        hasScopeId: Boolean(scopeId),
         hasChannelId: Boolean(channelId),
         hasDate: Boolean(date),
         hasProfile: Boolean(encodedProfile),
@@ -148,7 +148,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     try {
       return await this.join(
         userId,
-        guildId,
+        scopeId,
         channelId,
         date,
         JSON.parse(decodeURIComponent(encodedProfile)) as PlayerProfile,
@@ -169,7 +169,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       });
     }
 
-    this.saveLatestActivityLaunchToken(body.guildId, body.channelId, body.interactionToken);
+    this.saveLatestActivityLaunchToken(body.scopeId, body.channelId, body.interactionToken);
 
     return new Response(null, {
       status: 204,
@@ -187,9 +187,9 @@ export class ProgressRoom extends DurableObject<Bindings> {
     return Response.json(this.getStoredActivityLaunchToken(channelId));
   }
 
-  async join(userId: string, guildId: string, channelId: string, date: string, profile: PlayerProfile) {
+  async join(userId: string, scopeId: string, channelId: string, date: string, profile: PlayerProfile) {
     console.log('progress_room:join', {
-      guildId,
+      scopeId,
       channelId,
       date,
       userId,
@@ -206,11 +206,11 @@ export class ProgressRoom extends DurableObject<Bindings> {
 
     // use this instead of websocket.accept() since it allows hibernation
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ userId, guildId, channelId, date } satisfies SocketAttachment);
+    server.serializeAttachment({ userId, scopeId, channelId, date } satisfies SocketAttachment);
     this.users.set(userId, server);
     this.saveProfile(userId, profile);
     this.ensurePlayerProgress(userId);
-    await this.updateActivityMessageForPlayer(userId, guildId, channelId, date);
+    await this.updateActivityMessageForPlayer(userId, scopeId, channelId, date);
 
     // send initial progress of all users to the newly connected client
     const usersProgress = Array.from(this.userProgress.entries())
@@ -244,7 +244,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       }
       const attachment = this.getSocketAttachment(ws);
       console.log('progress_room:message_guess', {
-        guildId: attachment.guildId,
+        scopeId: attachment.scopeId,
         channelId: attachment.channelId,
         date: attachment.date,
         userId: attachment.userId,
@@ -293,7 +293,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     if (typeof attachment === 'string') {
       return {
         userId: attachment,
-        guildId: '',
+        scopeId: '',
         channelId: '',
         date: '',
       };
@@ -302,7 +302,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     return attachment as SocketAttachment;
   }
 
-  async saveGuess({ userId, guildId, channelId, date }: SocketAttachment, newGuess: PlayerGuess) {
+  async saveGuess({ userId, scopeId, channelId, date }: SocketAttachment, newGuess: PlayerGuess) {
     // Update in-memory progress and persist to SQL storage
     if (this.userProgress.has(userId)) {
       this.userProgress.get(userId)?.push(newGuess);
@@ -317,14 +317,14 @@ export class ProgressRoom extends DurableObject<Bindings> {
     `, userId, JSON.stringify(progress));
 
     console.log('progress:guess_saved', {
-      guildId,
+      scopeId,
       channelId,
       date,
       userId,
       guessCount: progress.length,
     });
 
-    await this.updateActivityMessageForPlayer(userId, guildId, channelId, date);
+    await this.updateActivityMessageForPlayer(userId, scopeId, channelId, date);
 
     // Send progress update to all connected clients via websocket
     for (const [observerUserId, socket] of this.users.entries()) {
@@ -347,8 +347,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
   }
 
-  async updateActivityMessageForPlayer(userId: string, guildId: string, channelId: string, date: string) {
-    if (!guildId || !channelId || !date) {
+  async updateActivityMessageForPlayer(userId: string, scopeId: string, channelId: string, date: string) {
+    if (!scopeId || !channelId || !date) {
       return;
     }
 
@@ -356,11 +356,11 @@ export class ProgressRoom extends DurableObject<Bindings> {
       return;
     }
 
-    await this.updateActivityMessage(guildId, channelId, date);
+    await this.updateActivityMessage(scopeId, channelId, date);
   }
 
   async updateActivityMessage(
-    guildId: string,
+    scopeId: string,
     channelId: string,
     date: string,
     interactionToken?: string,
@@ -368,7 +368,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     const puzzle = await getPuzzleData(this.env, date);
     if (!puzzle) {
       console.warn('activity_message:skip_missing_puzzle', {
-        guildId,
+        scopeId,
         channelId,
         date,
       });
@@ -380,9 +380,9 @@ export class ProgressRoom extends DurableObject<Bindings> {
       return;
     }
 
-    let metadata = this.getActivityMessageMetadata(guildId, channelId, date);
+    let metadata = this.getActivityMessageMetadata(scopeId, channelId, date);
     let result = await sendActivityLaunchMessage(this.env, {
-      guildId,
+      scopeId,
       channelId,
       date,
       metadata,
@@ -392,10 +392,10 @@ export class ProgressRoom extends DurableObject<Bindings> {
     });
 
     if (result.result === 'needs_interaction') {
-      const launchToken = await this.getLatestActivityLaunchToken(guildId, channelId);
+      const launchToken = await this.getLatestActivityLaunchToken(scopeId, channelId);
       if (!launchToken || launchToken.tokenExpiresAt <= Date.now()) {
         console.warn('activity_message:skip_no_current_launch_token', {
-          guildId,
+          scopeId,
           channelId,
           date,
           hasLaunchToken: Boolean(launchToken),
@@ -405,13 +405,13 @@ export class ProgressRoom extends DurableObject<Bindings> {
       }
 
       console.log('activity_message:reuse_current_launch_token', {
-        guildId,
+        scopeId,
         channelId,
         date,
       });
       metadata = result.metadata;
       result = await sendActivityLaunchMessage(this.env, {
-        guildId,
+        scopeId,
         channelId,
         date,
         metadata,
@@ -440,7 +440,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       .sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
 
-  saveLatestActivityLaunchToken(guildId: string, channelId: string, interactionToken: string) {
+  saveLatestActivityLaunchToken(scopeId: string, channelId: string, interactionToken: string) {
     const tokenExpiresAt = Date.now() + INTERACTION_TOKEN_TTL_MS;
     this.sql.exec(`
       INSERT INTO launch_tokens (channel_id, interaction_token, token_expires_at)
@@ -450,21 +450,21 @@ export class ProgressRoom extends DurableObject<Bindings> {
         token_expires_at=excluded.token_expires_at;
     `, channelId, interactionToken, tokenExpiresAt);
     console.log('activity_message:launch_token_stored', {
-      guildId,
+      scopeId,
       channelId,
       expiresInMs: INTERACTION_TOKEN_TTL_MS,
     });
   }
 
-  async getLatestActivityLaunchToken(guildId: string, channelId: string): Promise<ActivityLaunchTokenState | null> {
-    const tokenRoom = this.env.PROGRESS_ROOMS.getByName(getActivityLaunchTokenRoomName(guildId));
+  async getLatestActivityLaunchToken(scopeId: string, channelId: string): Promise<ActivityLaunchTokenState | null> {
+    const tokenRoom = this.env.PROGRESS_ROOMS.getByName(getActivityLaunchTokenRoomName(scopeId));
     const response = await tokenRoom.fetch(
       `https://progress-room/activity/launch-token?channelId=${encodeURIComponent(channelId)}`,
     );
 
     if (!response.ok) {
       console.error('activity_message:get_launch_token_failed', {
-        guildId,
+        scopeId,
         channelId,
         status: response.status,
         body: await response.text(),
@@ -495,7 +495,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     };
   }
 
-  getActivityMessageMetadata(guildId: string, channelId: string, date: string): ActivityMessageMetadata | null {
+  getActivityMessageMetadata(scopeId: string, channelId: string, date: string): ActivityMessageMetadata | null {
     const metadata = this.sql.exec<{
       message_id: string | null;
       interaction_token: string | null;
@@ -512,7 +512,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
 
     return {
-      guildId,
+      scopeId,
       channelId,
       date,
       messageId: metadata.message_id,
@@ -545,10 +545,10 @@ function isActivityInteractionRequest(value: unknown): value is ActivityInteract
   return typeof value === 'object' &&
     value !== null &&
     typeof (value as ActivityInteractionRequest).interactionToken === 'string' &&
-    typeof (value as ActivityInteractionRequest).guildId === 'string' &&
+    typeof (value as ActivityInteractionRequest).scopeId === 'string' &&
     typeof (value as ActivityInteractionRequest).channelId === 'string';
 }
 
-function getActivityLaunchTokenRoomName(guildId: string) {
-  return `${guildId}:launch-token`;
+function getActivityLaunchTokenRoomName(scopeId: string) {
+  return `${scopeId}:launch-token`;
 }

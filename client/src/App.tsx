@@ -141,6 +141,10 @@ function getDiscordProfile(user: DiscordSession['user']): PlayerProfile {
   }
 }
 
+function getActivityScopeId(guildId: string | null, channelId: string) {
+  return guildId ? `guild:${guildId}` : `dm:${channelId}`
+}
+
 function getShortUserId(userId: string) {
   return userId.length > 4 ? userId.slice(-4) : userId
 }
@@ -246,8 +250,11 @@ function App() {
   const hasReportedFinalGuess = useRef(false)
   const hydratedProgressKey = useRef<string | null>(null)
   const puzzleDate = useMemo(() => formatPuzzleDate(new Date()), [])
-  const progressConnectionKey = discordSession?.guildId && discordSession.channelId && discordSession.user.id
-    ? `${discordSession.guildId}:${discordSession.channelId}:${discordSession.user.id}:${puzzleDate}`
+  const progressScopeId = discordSession?.channelId
+    ? getActivityScopeId(discordSession.guildId, discordSession.channelId)
+    : null
+  const progressConnectionKey = progressScopeId && discordSession?.channelId && discordSession.user.id
+    ? `${progressScopeId}:${discordSession.channelId}:${discordSession.user.id}:${puzzleDate}`
     : null
   const isProgressRestoreReady = isDiscordReady && (
     !progressConnectionKey ||
@@ -336,22 +343,24 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const guildId = discordSession?.guildId
+    const scopeId = discordSession?.channelId
+      ? getActivityScopeId(discordSession.guildId, discordSession.channelId)
+      : null
     const channelId = discordSession?.channelId
     const userId = discordSession?.user.id
     const accessToken = discordSession?.accessToken
-    const connectionKey = guildId && channelId && userId
-      ? `${guildId}:${channelId}:${userId}:${puzzleDate}`
+    const connectionKey = scopeId && channelId && userId
+      ? `${scopeId}:${channelId}:${userId}:${puzzleDate}`
       : null
 
     pendingProgressGuesses.current = []
     hasReportedFinalGuess.current = false
 
-    if (!guildId || !channelId || !userId || !accessToken || !connectionKey) {
+    if (!scopeId || !channelId || !userId || !accessToken || !connectionKey) {
       return
     }
 
-    const socket = new WebSocket(getProgressWebSocketUrl(guildId, channelId, puzzleDate, userId, accessToken))
+    const socket = new WebSocket(getProgressWebSocketUrl(scopeId, channelId, puzzleDate, userId, accessToken))
     let hasReceivedSnapshot = false
     const restoreTimeout = window.setTimeout(() => {
       if (!hasReceivedSnapshot) {
@@ -557,7 +566,7 @@ function App() {
   }
 
   function queueProgressGuess(guess: PlayerGuess, isFinalGuess: boolean) {
-    if (!discordSession?.guildId || hasReportedFinalGuess.current) {
+    if (!discordSession || !progressConnectionKey || hasReportedFinalGuess.current) {
       return
     }
 
@@ -880,7 +889,7 @@ function ProgressPanel({
   players: ProgressPlayer[]
 }) {
   return (
-    <aside className="progress-panel" aria-label="Guild progress">
+    <aside className="progress-panel" aria-label="Activity progress">
       {players.length > 0 ? (
         <div className="progress-player-list">
           {players.map((player) => {

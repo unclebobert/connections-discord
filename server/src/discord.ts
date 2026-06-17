@@ -35,8 +35,9 @@ export type DiscordInteraction = {
 };
 
 export type InteractionLaunchContext = {
-  guildId: string;
+  guildId: string | null;
   channelId: string;
+  scopeId: string;
   userId: string;
   displayName: string;
   avatarUrl: string | null;
@@ -50,7 +51,7 @@ export type ActivityMessagePlayer = {
 };
 
 type ActivityMessageState = {
-  guildId: string;
+  scopeId: string;
   channelId: string;
   date: string;
   messageId: string | null;
@@ -103,21 +104,26 @@ export function createEphemeralInteractionMessage(content: string) {
 }
 
 export function getInteractionLaunchContext(interaction: DiscordInteraction) {
-  const guildId = interaction.guild_id;
+  const guildId = interaction.guild_id ?? null;
   const channelId = interaction.channel_id;
   const user = interaction.member?.user ?? interaction.user;
 
-  if (!guildId || !channelId || !user) {
+  if (!channelId || !user) {
     return null;
   }
 
   return {
     guildId,
     channelId,
+    scopeId: getActivityScopeId(guildId, channelId),
     userId: user.id,
     displayName: getDiscordDisplayName(user),
     avatarUrl: getDiscordAvatarUrl(user),
   };
+}
+
+export function getActivityScopeId(guildId: string | null | undefined, channelId: string) {
+  return guildId ? `guild:${guildId}` : `dm:${channelId}`;
 }
 
 export function getDiscordDisplayName(user: DiscordUser | undefined) {
@@ -137,7 +143,7 @@ export async function storeActivityLaunchTokenForInteraction(
   interactionToken: string,
   context: InteractionLaunchContext,
 ) {
-  const room = env.PROGRESS_ROOMS.getByName(getActivityLaunchTokenRoomName(context.guildId));
+  const room = env.PROGRESS_ROOMS.getByName(getActivityLaunchTokenRoomName(context.scopeId));
   const response = await room.fetch('https://progress-room/activity/launch-token', {
     method: 'POST',
     headers: {
@@ -145,13 +151,14 @@ export async function storeActivityLaunchTokenForInteraction(
     },
     body: JSON.stringify({
       interactionToken,
-      guildId: context.guildId,
+      scopeId: context.scopeId,
       channelId: context.channelId,
     }),
   });
 
   if (!response.ok) {
     console.error('activity_message:store_launch_token_failed', {
+      scopeId: context.scopeId,
       guildId: context.guildId,
       channelId: context.channelId,
       status: response.status,
@@ -163,7 +170,7 @@ export async function storeActivityLaunchTokenForInteraction(
 export async function sendActivityLaunchMessage(
   env: DiscordApiEnv,
   options: {
-    guildId: string;
+    scopeId: string;
     channelId: string;
     date: string;
     metadata: ActivityMessageMetadata | null;
@@ -178,7 +185,7 @@ export async function sendActivityLaunchMessage(
 > {
   const now = Date.now();
   const state = {
-    guildId: options.guildId,
+    scopeId: options.scopeId,
     channelId: options.channelId,
     date: options.date,
     messageId: options.metadata?.messageId ?? null,
@@ -196,7 +203,7 @@ export async function sendActivityLaunchMessage(
 
   if (canEditExistingMessage) {
     console.log('activity_message:edit_attempt', {
-      guildId: options.guildId,
+      scopeId: options.scopeId,
       channelId: options.channelId,
       date: options.date,
       playerCount: state.players.length,
@@ -215,7 +222,7 @@ export async function sendActivityLaunchMessage(
         lastUpdatedAt: now,
       };
       console.log('activity_message:edit_sent', {
-        guildId: options.guildId,
+        scopeId: options.scopeId,
         channelId: options.channelId,
         date: options.date,
       });
@@ -225,7 +232,7 @@ export async function sendActivityLaunchMessage(
 
   if (!options.canCreateMessage || !options.interactionToken) {
     console.log('activity_message:needs_fresh_interaction', {
-      guildId: options.guildId,
+      scopeId: options.scopeId,
       channelId: options.channelId,
       date: options.date,
       reason: options.metadata?.lastUpdatedAt && now - options.metadata.lastUpdatedAt > MESSAGE_STALE_AFTER_MS
@@ -236,7 +243,7 @@ export async function sendActivityLaunchMessage(
   }
 
   console.log('activity_message:followup_attempt', {
-    guildId: options.guildId,
+    scopeId: options.scopeId,
     channelId: options.channelId,
     date: options.date,
     playerCount: state.players.length,
@@ -256,7 +263,7 @@ export async function sendActivityLaunchMessage(
       lastUpdatedAt: now,
     };
     console.log('activity_message:followup_sent', {
-      guildId: options.guildId,
+      scopeId: options.scopeId,
       channelId: options.channelId,
       date: options.date,
       messageId: message.id,
@@ -358,21 +365,16 @@ export async function exchangeDiscordCode(env: Bindings, code: string) {
 export async function validateDiscordAccess(
   accessToken: string,
   expectedUserId: string,
-  expectedGuildId: string,
+  expectedGuildId: string | null,
 ): Promise<{ ok: true; profile: PlayerProfile } | { ok: false; status: 401 | 403 | 502; error: string }> {
   const authHeaders = {
     Authorization: `Bearer ${accessToken}`,
   };
-  const [userResponse, guildsResponse] = await Promise.all([
-    fetch('https://discord.com/api/users/@me', {
-      headers: authHeaders,
-    }),
-    fetch('https://discord.com/api/users/@me/guilds', {
-      headers: authHeaders,
-    }),
-  ]);
+  const userResponse = await fetch('https://discord.com/api/users/@me', {
+    headers: authHeaders,
+  });
 
-  if (userResponse.status === 401 || guildsResponse.status === 401) {
+  if (userResponse.status === 401) {
     return { ok: false, status: 401, error: 'Invalid access token' };
   }
 
@@ -385,13 +387,23 @@ export async function validateDiscordAccess(
     return { ok: false, status: 403, error: 'Access token does not match user' };
   }
 
-  if (!guildsResponse.ok) {
-    return { ok: false, status: 502, error: 'Unable to verify Discord guild access' };
-  }
+  if (expectedGuildId) {
+    const guildsResponse = await fetch('https://discord.com/api/users/@me/guilds', {
+      headers: authHeaders,
+    });
 
-  const guilds = await guildsResponse.json<DiscordGuild[]>();
-  if (!guilds.some((guild) => guild.id === expectedGuildId)) {
-    return { ok: false, status: 403, error: 'User is not a member of this guild' };
+    if (guildsResponse.status === 401) {
+      return { ok: false, status: 401, error: 'Invalid access token' };
+    }
+
+    if (!guildsResponse.ok) {
+      return { ok: false, status: 502, error: 'Unable to verify Discord guild access' };
+    }
+
+    const guilds = await guildsResponse.json<DiscordGuild[]>();
+    if (!guilds.some((guild) => guild.id === expectedGuildId)) {
+      return { ok: false, status: 403, error: 'User is not a member of this guild' };
+    }
   }
 
   return {
@@ -503,7 +515,7 @@ function normalizeActivityMessagePlayer(player: ActivityMessagePlayer): Activity
 
 function getActivityMessageMetadata(state: ActivityMessageState): ActivityMessageMetadata {
   return {
-    guildId: state.guildId,
+    scopeId: state.scopeId,
     channelId: state.channelId,
     date: state.date,
     messageId: state.messageId,
@@ -513,8 +525,8 @@ function getActivityMessageMetadata(state: ActivityMessageState): ActivityMessag
   };
 }
 
-function getActivityLaunchTokenRoomName(guildId: string) {
-  return `${guildId}:launch-token`;
+function getActivityLaunchTokenRoomName(scopeId: string) {
+  return `${scopeId}:launch-token`;
 }
 
 function formatProgressRow(player: ActivityMessagePlayer) {
