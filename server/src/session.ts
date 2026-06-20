@@ -28,6 +28,11 @@ type ProgressGuessMessage = {
   messageId?: string;
   guess: PlayerGuess;
 };
+type ActivityMessageUpdate = {
+  scopeId: string;
+  channelId: string;
+  date: string;
+};
 
 export class ProgressRoom extends DurableObject<Bindings> {
   sql: SqlStorage;
@@ -36,6 +41,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
   userProgress: Map<string, PlayerProgress>;
   loadedProgressDates: Set<string>;
   userProfiles: Map<string, PlayerProfile>;
+  pendingActivityMessageUpdates: Map<string, ActivityMessageUpdate>;
+  activityMessageUpdateTask: Promise<void> | null;
 
   constructor(ctx: DurableObjectState, env: Bindings) {
     // Required, as we're extending the base class.
@@ -52,6 +59,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
     this.userProgress = new Map();
     this.loadedProgressDates = new Set();
+    this.pendingActivityMessageUpdates = new Map();
+    this.activityMessageUpdateTask = null;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS progress (
         date TEXT NOT NULL,
@@ -187,7 +196,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     return Response.json(this.getStoredActivityLaunchToken(channelId));
   }
 
-  async join(userId: string, scopeId: string, channelId: string, date: string, profile: PlayerProfile) {
+  join(userId: string, scopeId: string, channelId: string, date: string, profile: PlayerProfile) {
     console.log('progress_room:join', {
       scopeId,
       channelId,
@@ -211,7 +220,6 @@ export class ProgressRoom extends DurableObject<Bindings> {
     this.users.set(socketKey, server);
     this.saveProfile(userId, profile);
     this.ensurePlayerProgress(userId, date);
-    await this.updateActivityMessageForPlayer(userId, scopeId, channelId, date);
 
     // send initial progress of all users to the newly connected client
     const usersProgress = this.getDateProgress(date)
@@ -221,6 +229,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
         profile: this.userProfiles.get(userId) ?? null,
       }));
     server.send(JSON.stringify(usersProgress));
+    this.queueActivityMessageUpdateForPlayer(userId, scopeId, channelId, date);
 
     return new Response(null, {
       status: 101,
@@ -250,9 +259,17 @@ export class ProgressRoom extends DurableObject<Bindings> {
         userId: attachment.userId,
         messageId,
       });
-      const progress = await this.saveGuess(attachment, guess);
+      const { progress, wasSaved } = this.saveGuess(attachment, guess);
       if (messageId) {
         this.sendProgressAck(ws, messageId, attachment.userId, progress);
+      }
+      if (wasSaved) {
+        this.queueActivityMessageUpdateForPlayer(
+          attachment.userId,
+          attachment.scopeId,
+          attachment.channelId,
+          attachment.date,
+        );
       }
     } catch (error) {
       console.error('Error parsing guess:', error);
@@ -353,7 +370,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       .map(([progressKey, progress]) => [progressKey.slice(prefix.length), progress]);
   }
 
-  async saveGuess({ userId, scopeId, channelId, date }: SocketAttachment, newGuess: PlayerGuess) {
+  saveGuess({ userId, scopeId, channelId, date }: SocketAttachment, newGuess: PlayerGuess) {
     // Update in-memory progress and persist to SQL storage
     this.loadDateProgress(date);
     const progressKey = getProgressKey(date, userId);
@@ -367,7 +384,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
         userId,
         guessCount: currentProgress.length,
       });
-      return currentProgress;
+      return { progress: currentProgress, wasSaved: false };
     }
 
     const progress = [...currentProgress, newGuess];
@@ -385,8 +402,6 @@ export class ProgressRoom extends DurableObject<Bindings> {
       userId,
       guessCount: progress.length,
     });
-
-    await this.updateActivityMessageForPlayer(userId, scopeId, channelId, date);
 
     // Send progress update to all connected clients via websocket
     for (const [socketKey, socket] of this.users.entries()) {
@@ -410,7 +425,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       }
     }
 
-    return progress;
+    return { progress, wasSaved: true };
   }
 
   sendProgressAck(ws: WebSocket, messageId: string, userId: string, progress: PlayerProgress) {
@@ -437,7 +452,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
   }
 
-  async updateActivityMessageForPlayer(userId: string, scopeId: string, channelId: string, date: string) {
+  queueActivityMessageUpdateForPlayer(userId: string, scopeId: string, channelId: string, date: string) {
     if (!scopeId || !channelId || !date) {
       return;
     }
@@ -446,7 +461,49 @@ export class ProgressRoom extends DurableObject<Bindings> {
       return;
     }
 
-    await this.updateActivityMessage(scopeId, channelId, date);
+    const update = { scopeId, channelId, date } satisfies ActivityMessageUpdate;
+    this.pendingActivityMessageUpdates.set(getActivityMessageUpdateKey(channelId, date), update);
+    this.startActivityMessageUpdateTask();
+  }
+
+  startActivityMessageUpdateTask() {
+    if (this.activityMessageUpdateTask) {
+      return;
+    }
+
+    const task = this.flushActivityMessageUpdates();
+    this.activityMessageUpdateTask = task;
+    this.ctx.waitUntil(task.finally(() => {
+      if (this.activityMessageUpdateTask !== task) {
+        return;
+      }
+
+      this.activityMessageUpdateTask = null;
+      if (this.pendingActivityMessageUpdates.size > 0) {
+        this.startActivityMessageUpdateTask();
+      }
+    }));
+  }
+
+  async flushActivityMessageUpdates() {
+    while (this.pendingActivityMessageUpdates.size > 0) {
+      const nextEntry = this.pendingActivityMessageUpdates.entries().next().value;
+      if (!nextEntry) {
+        return;
+      }
+
+      const [updateKey, update] = nextEntry;
+      this.pendingActivityMessageUpdates.delete(updateKey);
+
+      try {
+        await this.updateActivityMessage(update.scopeId, update.channelId, update.date);
+      } catch (error) {
+        console.warn('activity_message:update_failed', {
+          ...update,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   async updateActivityMessage(
@@ -645,4 +702,8 @@ function getProgressKey(date: string, userId: string) {
 
 function getSocketKey(date: string, userId: string) {
   return getProgressKey(date, userId);
+}
+
+function getActivityMessageUpdateKey(channelId: string, date: string) {
+  return `${date}:${channelId}`;
 }

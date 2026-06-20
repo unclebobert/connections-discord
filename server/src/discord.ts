@@ -77,6 +77,7 @@ type DiscordTokenResponse = {
 };
 
 const DISCORD_API_BASE_URL = 'https://discord.com/api/v10';
+const DISCORD_MESSAGE_REQUEST_TIMEOUT_MS = 5000;
 export const INTERACTION_TOKEN_TTL_MS = 14 * 60 * 1000;
 const MESSAGE_STALE_AFTER_MS = 60 * 60 * 1000;
 const NAME_COLUMN_WIDTH = 14;
@@ -460,6 +461,7 @@ async function createInteractionFollowup(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(DISCORD_MESSAGE_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -494,6 +496,7 @@ async function editInteractionFollowup(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(DISCORD_MESSAGE_REQUEST_TIMEOUT_MS),
     },
   );
 
@@ -502,6 +505,7 @@ async function editInteractionFollowup(
     return false;
   }
 
+  await response.body?.cancel();
   return true;
 }
 
