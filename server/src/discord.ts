@@ -455,25 +455,38 @@ async function createInteractionFollowup(
     return null;
   }
 
-  const response = await fetch(`${DISCORD_API_BASE_URL}/webhooks/${clientId}/${interactionToken}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(DISCORD_MESSAGE_REQUEST_TIMEOUT_MS),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DISCORD_MESSAGE_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${DISCORD_API_BASE_URL}/webhooks/${clientId}/${interactionToken}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
 
-  if (!response.ok) {
-    console.error('Unable to create activity followup message:', response.status, await response.text());
+    if (!response.ok) {
+      console.error('Unable to create activity followup message:', response.status, await response.text());
+      return null;
+    }
+
+    const message = await response.json<{ id: string }>();
+    console.log('activity_message:followup_response_ok', {
+      status: response.status,
+    });
+    return message;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.error('Unable to create activity followup message: request timed out');
+    } else {
+      console.error('Unable to create activity followup message:', error);
+    }
     return null;
+  } finally {
+    clearTimeout(timer);
   }
-
-  const message = await response.json<{ id: string }>();
-  console.log('activity_message:followup_response_ok', {
-    status: response.status,
-  });
-  return message;
 }
 
 async function editInteractionFollowup(
@@ -488,25 +501,38 @@ async function editInteractionFollowup(
     return false;
   }
 
-  const response = await fetch(
-    `${DISCORD_API_BASE_URL}/webhooks/${clientId}/${interactionToken}/messages/${messageId}`,
-    {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DISCORD_MESSAGE_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(
+      `${DISCORD_API_BASE_URL}/webhooks/${clientId}/${interactionToken}/messages/${messageId}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
       },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(DISCORD_MESSAGE_REQUEST_TIMEOUT_MS),
-    },
-  );
+    );
 
-  if (!response.ok) {
-    console.error('Unable to edit activity followup message:', response.status, await response.text());
+    if (!response.ok) {
+      console.error('Unable to edit activity followup message:', response.status, await response.text());
+      return false;
+    }
+
+    await response.body?.cancel();
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.error('Unable to edit activity followup message: request timed out');
+    } else {
+      console.error('Unable to edit activity followup message:', error);
+    }
     return false;
+  } finally {
+    clearTimeout(timer);
   }
-
-  await response.body?.cancel();
-  return true;
 }
 
 function normalizeActivityMessagePlayer(player: ActivityMessagePlayer): ActivityMessagePlayer {
