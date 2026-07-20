@@ -15,8 +15,8 @@
 
 .game-shell {
   width: min(100%, 1240px);
-  display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
+  display: flex;
+  flex-direction: row;
   gap: 12px;
   overflow: hidden;
 }
@@ -26,6 +26,7 @@
 }
 
 .game-column {
+  flex-grow: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -64,7 +65,6 @@
   grid-template-columns: 34px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
-  min-height: 68px;
   padding: 6px;
   border: 1px solid #d6d7dc;
   border-radius: 8px;
@@ -239,6 +239,7 @@
   width: 100%;
   height: 100%;
   opacity: 1;
+  text-align: center;
 }
 
 .solved-group-shell {
@@ -466,7 +467,7 @@
   }
 
   .game-shell {
-    grid-template-columns: minmax(0, 1fr);
+    flex-direction: column;
     gap: 6px;
   }
 
