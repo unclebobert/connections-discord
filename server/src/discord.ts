@@ -517,7 +517,13 @@ async function editInteractionFollowup(
     );
 
     if (!response.ok) {
-      console.error('Unable to edit activity followup message:', response.status, await response.text());
+      // Worth counting by status: a 429 here sends updateActivityMessage down the
+      // needs_interaction path, where it can post a duplicate launch message rather
+      // than retrying the edit.
+      console.error('activity_message:edit_failed', {
+        status: response.status,
+        body: await response.text(),
+      });
       return false;
     }
 

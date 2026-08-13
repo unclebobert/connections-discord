@@ -55,7 +55,9 @@ const TOTAL_CATEGORIES = 4
 const PROGRESS_RESTORE_TIMEOUT_MS = 8000
 const PROGRESS_SAVE_WARNING_TIMEOUT_MS = 6000
 const PROGRESS_SAVE_WARNING_TOAST_MS = 3000
-const PROGRESS_RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000]
+const PROGRESS_RECONNECT_BASE_DELAY_MS = 1000
+const PROGRESS_RECONNECT_MAX_DELAY_MS = 60000
+const PROGRESS_STABLE_CONNECTION_MS = 30000
 const PENDING_PROGRESS_QUEUE_KEY_PREFIX = 'connections:pending-progress:'
 const MAX_PENDING_PROGRESS_GUESSES = 12
 
@@ -457,6 +459,8 @@ function App() {
     let hasReceivedSnapshot = false
     let reconnectAttempt = 0
     let reconnectTimer: number | null = null
+    let stableConnectionTimer: number | null = null
+    let isReconnectDeferred = false
     let isCancelled = false
     const restoreTimeout = window.setTimeout(() => {
       if (!hasReceivedSnapshot) {
@@ -487,15 +491,34 @@ function App() {
         return
       }
 
-      const delay = PROGRESS_RECONNECT_DELAYS_MS[Math.min(
-        reconnectAttempt,
-        PROGRESS_RECONNECT_DELAYS_MS.length - 1,
-      )]
+      if (document.visibilityState === 'hidden') {
+        // Timers are throttled in background tabs, so retrying here mostly produces
+        // connections nobody is watching. Wait for the Activity to come back instead.
+        isReconnectDeferred = true
+        return
+      }
+
+      const ceiling = Math.min(
+        PROGRESS_RECONNECT_MAX_DELAY_MS,
+        PROGRESS_RECONNECT_BASE_DELAY_MS * 2 ** reconnectAttempt,
+      )
+      // Equal jitter: never retry sooner than half the backoff, but spread a herd of
+      // clients that all dropped at the same moment.
+      const delay = ceiling / 2 + Math.random() * (ceiling / 2)
       reconnectAttempt += 1
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null
         connectProgressSocket()
       }, delay)
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState !== 'visible' || !isReconnectDeferred) {
+        return
+      }
+
+      isReconnectDeferred = false
+      ensureProgressSocketIsOpen()
     }
 
     function markRestoreUnavailable() {
@@ -527,13 +550,30 @@ function App() {
       progressSocket.current = nextSocket
 
       nextSocket.addEventListener('open', () => {
-        reconnectAttempt = 0
+        // Resetting the attempt count on `open` alone lets a connect-then-immediately-drop
+        // cycle retry at the base delay forever, because every attempt "succeeds" before
+        // failing. Only a connection that survives a while counts as healthy.
+        if (stableConnectionTimer !== null) {
+          window.clearTimeout(stableConnectionTimer)
+        }
+
+        stableConnectionTimer = window.setTimeout(() => {
+          stableConnectionTimer = null
+          if (progressSocket.current === nextSocket) {
+            reconnectAttempt = 0
+          }
+        }, PROGRESS_STABLE_CONNECTION_MS)
         flushProgressQueue(nextSocket, activeUserId, pendingProgressGuesses, sentProgressGuessIds)
       })
       nextSocket.addEventListener('close', (event) => {
         const isCurrentSocket = progressSocket.current === nextSocket
         if (isCurrentSocket) {
           progressSocket.current = null
+        }
+
+        if (stableConnectionTimer !== null) {
+          window.clearTimeout(stableConnectionTimer)
+          stableConnectionTimer = null
         }
 
         console.warn('Progress socket closed:', {
@@ -610,20 +650,27 @@ function App() {
         reconnectTimer = null
       }
 
+      isReconnectDeferred = false
       connectProgressSocket()
     }
 
     ensureProgressSocket.current = ensureProgressSocketIsOpen
+    document.addEventListener('visibilitychange', handleVisibilityChange)
     connectProgressSocket()
 
     return () => {
       isCancelled = true
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       if (ensureProgressSocket.current === ensureProgressSocketIsOpen) {
         ensureProgressSocket.current = null
       }
 
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer)
+      }
+
+      if (stableConnectionTimer !== null) {
+        window.clearTimeout(stableConnectionTimer)
       }
 
       if (progressSaveWarningTimer.current !== null) {

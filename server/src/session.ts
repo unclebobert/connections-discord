@@ -33,6 +33,11 @@ type ActivityMessageUpdate = {
   channelId: string;
   date: string;
 };
+type SqlUsage = {
+  calls: number;
+  rowsRead: number;
+  rowsWritten: number;
+};
 
 export class ProgressRoom extends DurableObject<Bindings> {
   sql: SqlStorage;
@@ -43,12 +48,14 @@ export class ProgressRoom extends DurableObject<Bindings> {
   userProfiles: Map<string, PlayerProfile>;
   pendingActivityMessageUpdates: Map<string, ActivityMessageUpdate>;
   activityMessageUpdateTask: Promise<void> | null;
+  sqlUsage: Map<string, SqlUsage>;
 
   constructor(ctx: DurableObjectState, env: Bindings) {
     // Required, as we're extending the base class.
     super(ctx, env)
     this.env = env;
     this.sql = ctx.storage.sql;
+    this.sqlUsage = new Map();
     // Since this can hibernate when websockets are idle, need to restore
     // the users map from the stored currently connected websockets,
     // because DOs get killed when hibernating
@@ -61,7 +68,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     this.loadedProgressDates = new Set();
     this.pendingActivityMessageUpdates = new Map();
     this.activityMessageUpdateTask = null;
-    this.sql.exec(`
+    this.trackedExec('schema:progress', `
       CREATE TABLE IF NOT EXISTS progress (
         date TEXT NOT NULL,
         user_id TEXT NOT NULL,
@@ -69,14 +76,14 @@ export class ProgressRoom extends DurableObject<Bindings> {
         PRIMARY KEY (date, user_id)
       );
     `)
-    this.sql.exec(`
+    this.trackedExec('schema:profiles', `
       CREATE TABLE IF NOT EXISTS profiles (
         user_id TEXT NOT NULL PRIMARY KEY,
         display_name TEXT NOT NULL,
         avatar_url TEXT
       );
     `)
-    this.sql.exec(`
+    this.trackedExec('schema:activity_messages', `
       CREATE TABLE IF NOT EXISTS activity_messages (
         date TEXT NOT NULL,
         channel_id TEXT NOT NULL,
@@ -87,7 +94,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
         PRIMARY KEY (date, channel_id)
       );
     `)
-    this.sql.exec(`
+    this.trackedExec('schema:launch_tokens', `
       CREATE TABLE IF NOT EXISTS launch_tokens (
         channel_id TEXT NOT NULL PRIMARY KEY,
         interaction_token TEXT NOT NULL,
@@ -96,19 +103,70 @@ export class ProgressRoom extends DurableObject<Bindings> {
     `)
 
     this.userProfiles = new Map();
-    const profiles = this.sql.exec(`
-      SELECT * FROM profiles;
-    `)
-    for (const { user_id: userId, display_name: displayName, avatar_url: avatarUrl } of profiles.toArray() as Array<{
+    const profiles = this.trackedQuery<{
       user_id: string,
       display_name: string,
       avatar_url: string | null,
-    }>) {
+    }>('profiles:load_all', `
+      SELECT * FROM profiles;
+    `)
+    for (const { user_id: userId, display_name: displayName, avatar_url: avatarUrl } of profiles) {
       this.userProfiles.set(userId, {
         displayName,
         avatarUrl,
       });
     }
+  }
+
+  /**
+   * Runs a statement and records what it cost against `site`.
+   *
+   * Use this for writes and DDL only. `rowsRead`/`rowsWritten` grow as a cursor is
+   * consumed, so anything that returns rows must go through `trackedQuery`, which
+   * records after draining.
+   */
+  trackedExec(site: string, query: string, ...bindings: unknown[]) {
+    const cursor = this.sql.exec(query, ...bindings);
+    this.recordSqlUsage(site, cursor);
+    return cursor;
+  }
+
+  trackedQuery<T extends Record<string, SqlStorageValue>>(site: string, query: string, ...bindings: unknown[]): T[] {
+    const cursor = this.sql.exec<T>(query, ...bindings);
+    const rows = cursor.toArray();
+    this.recordSqlUsage(site, cursor);
+    return rows;
+  }
+
+  recordSqlUsage(site: string, cursor: { rowsRead: number; rowsWritten: number }) {
+    const usage = this.sqlUsage.get(site) ?? { calls: 0, rowsRead: 0, rowsWritten: 0 };
+    usage.calls += 1;
+    usage.rowsRead += cursor.rowsRead;
+    usage.rowsWritten += cursor.rowsWritten;
+    this.sqlUsage.set(site, usage);
+  }
+
+  /**
+   * Emits one aggregate line per Durable Object invocation. Called at every entry
+   * point rather than on a timer, because a pending timer would keep the object
+   * out of hibernation.
+   */
+  flushSqlUsage(event: string) {
+    if (this.sqlUsage.size === 0) {
+      return;
+    }
+
+    let rowsRead = 0;
+    let rowsWritten = 0;
+    const sites: Record<string, SqlUsage> = {};
+    for (const [site, usage] of this.sqlUsage) {
+      sites[site] = usage;
+      rowsRead += usage.rowsRead;
+      rowsWritten += usage.rowsWritten;
+    }
+
+    this.sqlUsage.clear();
+    console.log('sql_usage', { event, rowsRead, rowsWritten, sites });
   }
 
   removeSocket(ws: WebSocket) {
@@ -120,6 +178,14 @@ export class ProgressRoom extends DurableObject<Bindings> {
   }
 
   async fetch(request: Request) {
+    try {
+      return await this.handleFetch(request);
+    } finally {
+      this.flushSqlUsage('fetch');
+    }
+  }
+
+  async handleFetch(request: Request) {
     const url = new URL(request.url);
     if (url.pathname === '/activity/launch-token' && request.method === 'POST') {
       return this.handleActivityLaunchToken(request);
@@ -273,6 +339,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
       }
     } catch (error) {
       console.error('Error parsing guess:', error);
+    } finally {
+      this.flushSqlUsage('websocket_message');
     }
   }
 
@@ -288,6 +356,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       wasClean: wasClean ?? null,
     });
     this.removeSocket(ws);
+    this.flushSqlUsage('websocket_close');
   }
 
   async webSocketError(ws: WebSocket, error?: unknown) {
@@ -300,11 +369,23 @@ export class ProgressRoom extends DurableObject<Bindings> {
       error: error instanceof Error ? error.message : String(error ?? ''),
     });
     this.removeSocket(ws);
+    this.flushSqlUsage('websocket_error');
   }
 
   saveProfile(userId: string, profile: PlayerProfile) {
+    const storedProfile = this.userProfiles.get(userId);
+    if (
+      storedProfile &&
+      storedProfile.displayName === profile.displayName &&
+      storedProfile.avatarUrl === profile.avatarUrl
+    ) {
+      // Display name and avatar are stable across sessions, so writing on every
+      // connect burns a row per reconnect to store what is already there.
+      return;
+    }
+
     this.userProfiles.set(userId, profile);
-    this.sql.exec(`
+    this.trackedExec('profiles:save', `
       INSERT INTO profiles (user_id, display_name, avatar_url)
       VALUES (?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET
@@ -318,15 +399,15 @@ export class ProgressRoom extends DurableObject<Bindings> {
       return;
     }
 
-    const cursor = this.sql.exec(`
+    const rows = this.trackedQuery<{
+      user_id: string,
+      progress: string,
+    }>('progress:load_date', `
       SELECT user_id, progress
       FROM progress
       WHERE date = ?;
     `, date);
-    for (const { user_id: userId, progress } of cursor.toArray() as Array<{
-      user_id: string,
-      progress: string,
-    }>) {
+    for (const { user_id: userId, progress } of rows) {
       this.userProgress.set(getProgressKey(date, userId), JSON.parse(progress));
     }
     this.loadedProgressDates.add(date);
@@ -340,7 +421,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
 
     this.userProgress.set(progressKey, []);
-    this.sql.exec(`
+    this.trackedExec('progress:ensure', `
       INSERT INTO progress (date, user_id, progress)
       VALUES (?, ?, ?)
       ON CONFLICT(date, user_id) DO NOTHING;
@@ -389,7 +470,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
 
     const progress = [...currentProgress, newGuess];
     this.userProgress.set(progressKey, progress);
-    this.sql.exec(`
+    this.trackedExec('progress:save_guess', `
       INSERT INTO progress (date, user_id, progress)
       VALUES (?, ?, ?)
       ON CONFLICT(date, user_id) DO UPDATE SET progress=excluded.progress;
@@ -486,23 +567,27 @@ export class ProgressRoom extends DurableObject<Bindings> {
   }
 
   async flushActivityMessageUpdates() {
-    while (this.pendingActivityMessageUpdates.size > 0) {
-      const nextEntry = this.pendingActivityMessageUpdates.entries().next().value;
-      if (!nextEntry) {
-        return;
-      }
+    try {
+      while (this.pendingActivityMessageUpdates.size > 0) {
+        const nextEntry = this.pendingActivityMessageUpdates.entries().next().value;
+        if (!nextEntry) {
+          return;
+        }
 
-      const [updateKey, update] = nextEntry;
-      this.pendingActivityMessageUpdates.delete(updateKey);
+        const [updateKey, update] = nextEntry;
+        this.pendingActivityMessageUpdates.delete(updateKey);
 
-      try {
-        await this.updateActivityMessage(update.scopeId, update.channelId, update.date);
-      } catch (error) {
-        console.warn('activity_message:update_failed', {
-          ...update,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        try {
+          await this.updateActivityMessage(update.scopeId, update.channelId, update.date);
+        } catch (error) {
+          console.warn('activity_message:update_failed', {
+            ...update,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
+    } finally {
+      this.flushSqlUsage('activity_message_update');
     }
   }
 
@@ -589,7 +674,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
 
   saveLatestActivityLaunchToken(scopeId: string, channelId: string, interactionToken: string) {
     const tokenExpiresAt = Date.now() + INTERACTION_TOKEN_TTL_MS;
-    this.sql.exec(`
+    this.trackedExec('launch_tokens:save', `
       INSERT INTO launch_tokens (channel_id, interaction_token, token_expires_at)
       VALUES (?, ?, ?)
       ON CONFLICT(channel_id) DO UPDATE SET
@@ -604,14 +689,14 @@ export class ProgressRoom extends DurableObject<Bindings> {
   }
 
   getLatestActivityLaunchToken(channelId: string): ActivityLaunchTokenState | null {
-    const token = this.sql.exec<{
+    const token = this.trackedQuery<{
       interaction_token: string;
       token_expires_at: number;
-    }>(`
+    }>('launch_tokens:get', `
       SELECT interaction_token, token_expires_at
       FROM launch_tokens
       WHERE channel_id = ?;
-    `, channelId).toArray()[0];
+    `, channelId)[0];
 
     if (!token) {
       return null;
@@ -628,16 +713,16 @@ export class ProgressRoom extends DurableObject<Bindings> {
   }
 
   getActivityMessageMetadata(scopeId: string, channelId: string, date: string): ActivityMessageMetadata | null {
-    const metadata = this.sql.exec<{
+    const metadata = this.trackedQuery<{
       message_id: string | null;
       interaction_token: string | null;
       token_expires_at: number;
       last_updated_at: number;
-    }>(`
+    }>('activity_messages:get', `
       SELECT message_id, interaction_token, token_expires_at, last_updated_at
       FROM activity_messages
       WHERE date = ? AND channel_id = ?;
-    `, date, channelId).toArray()[0];
+    `, date, channelId)[0];
 
     if (!metadata) {
       return null;
@@ -655,7 +740,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
   }
 
   saveActivityMessageMetadata(metadata: ActivityMessageMetadata) {
-    this.sql.exec(`
+    this.trackedExec('activity_messages:save', `
       INSERT INTO activity_messages (
         date,
         channel_id,

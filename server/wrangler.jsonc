@@ -3,19 +3,24 @@
   "name": "connections-discord-server",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-19",
+  // Workers Logs on the free plan allows 200,000 events/day. At full sampling this
+  // Worker emits enough events to blow through that before the day ends, which
+  // silently truncates the busiest hours and makes log-derived counts unusable.
+  // Sampling whole invocations keeps ratios intact; absolute totals come from the
+  // Workers/Durable Objects metrics instead.
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1,
+    "head_sampling_rate": 0.05,
     "logs": {
       "enabled": true,
-      "head_sampling_rate": 1,
+      "head_sampling_rate": 0.05,
       "persist": true,
-      "invocation_logs": true
+      "invocation_logs": false
     },
     "traces": {
       "enabled": true,
       "persist": true,
-      "head_sampling_rate": 1
+      "head_sampling_rate": 0.05
     }
   },
   "kv_namespaces": [

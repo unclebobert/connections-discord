@@ -19,9 +19,22 @@ export type ProgressMessageSummary = {
 };
 
 const MAX_MISTAKES = 4;
+const MAX_CACHED_PUZZLES = 8;
+
+// Per-isolate caches. A published puzzle never changes, so memoising it removes a
+// billed KV read from every activity message update, and the written-key set stops
+// a colo from re-writing the same key on every miss.
+const puzzleCache = new Map<string, GameData>();
+const writtenPuzzleKeys = new Set<string>();
 
 export async function getPuzzleData(env: Pick<Bindings, 'KV'>, date: string) {
-  let data = await env.KV.get<GameData>(getPuzzleKey(date), { type: 'json', cacheTtl: 86400 });
+  const cachedPuzzle = puzzleCache.get(date);
+  if (cachedPuzzle) {
+    return cachedPuzzle;
+  }
+
+  const puzzleKey = getPuzzleKey(date);
+  let data = await env.KV.get<GameData>(puzzleKey, { type: 'json', cacheTtl: 86400 });
 
   if (!data) {
     const response = await fetch(`https://www.nytimes.com/svc/connections/v2/${date}.json`, {
@@ -31,14 +44,39 @@ export async function getPuzzleData(env: Pick<Bindings, 'KV'>, date: string) {
     });
 
     if (!response.ok) {
+      // Expected whenever a client's local date is ahead of NYT's publication.
+      console.warn('puzzle:fetch_failed', { date, status: response.status });
       return null;
     }
 
     data = await response.json<GameData>();
-    await env.KV.put(getPuzzleKey(date), JSON.stringify(data));
+
+    // KV caches negative lookups for the whole cacheTtl, so a colo that asked before
+    // publication keeps missing afterwards. Writing on each of those misses burns the
+    // 1,000 writes/day free allowance, which is the tightest limit in the system.
+    if (writtenPuzzleKeys.has(puzzleKey)) {
+      console.log('puzzle:kv_put_skipped', { date });
+    } else {
+      writtenPuzzleKeys.add(puzzleKey);
+      console.log('puzzle:kv_put', { date });
+      await env.KV.put(puzzleKey, JSON.stringify(data));
+    }
   }
 
+  cachePuzzle(date, data);
+
   return data;
+}
+
+function cachePuzzle(date: string, data: GameData) {
+  if (puzzleCache.size >= MAX_CACHED_PUZZLES) {
+    const oldestDate = puzzleCache.keys().next().value;
+    if (oldestDate !== undefined) {
+      puzzleCache.delete(oldestDate);
+    }
+  }
+
+  puzzleCache.set(date, data);
 }
 
 export function summarizeProgressForMessage(progress: PlayerProgress, data: GameData): ProgressMessageSummary {
