@@ -10,17 +10,17 @@
   // Workers/Durable Objects metrics instead.
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 0.05,
+    "head_sampling_rate": 0.02,
     "logs": {
       "enabled": true,
-      "head_sampling_rate": 0.05,
+      "head_sampling_rate": 0.02,
       "persist": true,
       "invocation_logs": false
     },
     "traces": {
       "enabled": true,
       "persist": true,
-      "head_sampling_rate": 0.05
+      "head_sampling_rate": 0.02
     }
   },
   "kv_namespaces": [

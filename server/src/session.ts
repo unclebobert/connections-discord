@@ -166,7 +166,12 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
 
     this.sqlUsage.clear();
-    console.log('sql_usage', { event, rowsRead, rowsWritten, sites });
+    // Logged as a single object so Workers Logs indexes `rowsWritten`/`rowsRead` as
+    // numeric fields. A string argument alongside would bury them in the message,
+    // where they can only be text-matched rather than summed and grouped.
+    // Grouping by `event` separates the guess path (websocket_message) from the join
+    // path (fetch) and the Discord message update (activity_message_update).
+    console.log({ msg: 'sql_usage', event, rowsRead, rowsWritten, sites });
   }
 
   removeSocket(ws: WebSocket) {
