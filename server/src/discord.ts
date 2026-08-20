@@ -203,13 +203,8 @@ export async function sendActivityLaunchMessage(
   );
 
   if (canEditExistingMessage) {
-    console.log('activity_message:edit_attempt', {
-      scopeId: options.scopeId,
-      channelId: options.channelId,
-      date: options.date,
-      playerCount: state.players.length,
-    });
-
+    // The attempt is not logged separately: `edit_sent` and `edit_failed` between
+    // them cover every outcome, and this path runs on every guess.
     const didEdit = await editInteractionFollowup(
       env,
       state.interactionToken!,

@@ -39,6 +39,12 @@ type SqlUsage = {
   rowsWritten: number;
 };
 
+// How stale the persisted `last_updated_at` is allowed to get. Only this column
+// moves on a routine progress update, and it is read back solely for the
+// MESSAGE_STALE_AFTER_MS check (one hour), so persisting it on every guess buys
+// nothing. Six times smaller than that window leaves plenty of margin.
+const ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS = 15 * 60 * 1000;
+
 export class ProgressRoom extends DurableObject<Bindings> {
   sql: SqlStorage;
   env: Bindings;
@@ -49,6 +55,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
   pendingActivityMessageUpdates: Map<string, ActivityMessageUpdate>;
   activityMessageUpdateTask: Promise<void> | null;
   sqlUsage: Map<string, SqlUsage>;
+  activityMessageMetadata: Map<string, ActivityMessageMetadata>;
+  persistedActivityMessageUpdatedAt: Map<string, number>;
 
   constructor(ctx: DurableObjectState, env: Bindings) {
     // Required, as we're extending the base class.
@@ -56,6 +64,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
     this.env = env;
     this.sql = ctx.storage.sql;
     this.sqlUsage = new Map();
+    this.activityMessageMetadata = new Map();
+    this.persistedActivityMessageUpdatedAt = new Map();
     // Since this can hibernate when websockets are idle, need to restore
     // the users map from the stored currently connected websockets,
     // because DOs get killed when hibernating
@@ -166,6 +176,15 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
 
     this.sqlUsage.clear();
+
+    // Durable Object invocations are not "incoming requests to your Worker", so the
+    // Worker's head_sampling_rate does not thin them out. Volume has to be cut at
+    // the source instead, and rows written is the metric under pressure, so
+    // read-only invocations are not worth an event.
+    if (rowsWritten === 0) {
+      return;
+    }
+
     // Logged as a single object so Workers Logs indexes `rowsWritten`/`rowsRead` as
     // numeric fields. A string argument alongside would bury them in the message,
     // where they can only be text-matched rather than summed and grouped.
@@ -323,13 +342,8 @@ export class ProgressRoom extends DurableObject<Bindings> {
         return;
       }
       const attachment = this.getSocketAttachment(ws);
-      console.log('progress_room:message_guess', {
-        scopeId: attachment.scopeId,
-        channelId: attachment.channelId,
-        date: attachment.date,
-        userId: attachment.userId,
-        messageId,
-      });
+      // No log here: `progress:guess_saved` below carries the same fields, and this
+      // handler is the highest-frequency event in the system.
       const { progress, wasSaved } = this.saveGuess(attachment, guess);
       if (messageId) {
         this.sendProgressAck(ws, messageId, attachment.userId, progress);
@@ -718,6 +732,14 @@ export class ProgressRoom extends DurableObject<Bindings> {
   }
 
   getActivityMessageMetadata(scopeId: string, channelId: string, date: string): ActivityMessageMetadata | null {
+    // The in-memory copy is authoritative while the object is alive; the stored row
+    // deliberately lags behind it by up to ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS.
+    const cacheKey = getActivityMessageUpdateKey(channelId, date);
+    const cachedMetadata = this.activityMessageMetadata.get(cacheKey);
+    if (cachedMetadata) {
+      return cachedMetadata;
+    }
+
     const metadata = this.trackedQuery<{
       message_id: string | null;
       interaction_token: string | null;
@@ -733,7 +755,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       return null;
     }
 
-    return {
+    const restoredMetadata = {
       scopeId,
       channelId,
       date,
@@ -742,9 +764,32 @@ export class ProgressRoom extends DurableObject<Bindings> {
       tokenExpiresAt: metadata.token_expires_at,
       lastUpdatedAt: metadata.last_updated_at,
     };
+    this.activityMessageMetadata.set(cacheKey, restoredMetadata);
+    this.persistedActivityMessageUpdatedAt.set(cacheKey, restoredMetadata.lastUpdatedAt);
+
+    return restoredMetadata;
   }
 
   saveActivityMessageMetadata(metadata: ActivityMessageMetadata) {
+    const cacheKey = getActivityMessageUpdateKey(metadata.channelId, metadata.date);
+    const previousMetadata = this.activityMessageMetadata.get(cacheKey);
+    const persistedUpdatedAt = this.persistedActivityMessageUpdatedAt.get(cacheKey);
+    this.activityMessageMetadata.set(cacheKey, metadata);
+
+    // message_id / interaction_token / token_expires_at identify the message and
+    // must be durable the moment they change. last_updated_at only feeds a
+    // one-hour staleness check, so it can lag.
+    const hasSameMessageIdentity = previousMetadata !== undefined &&
+      previousMetadata.messageId === metadata.messageId &&
+      previousMetadata.interactionToken === metadata.interactionToken &&
+      previousMetadata.tokenExpiresAt === metadata.tokenExpiresAt;
+    const isPersistedUpdatedAtRecent = persistedUpdatedAt !== undefined &&
+      metadata.lastUpdatedAt - persistedUpdatedAt < ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS;
+
+    if (hasSameMessageIdentity && isPersistedUpdatedAtRecent) {
+      return;
+    }
+
     this.trackedExec('activity_messages:save', `
       INSERT INTO activity_messages (
         date,
@@ -761,6 +806,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
         token_expires_at=excluded.token_expires_at,
         last_updated_at=excluded.last_updated_at;
     `, metadata.date, metadata.channelId, metadata.messageId, metadata.interactionToken, metadata.tokenExpiresAt, metadata.lastUpdatedAt);
+    this.persistedActivityMessageUpdatedAt.set(cacheKey, metadata.lastUpdatedAt);
   }
 }
 
