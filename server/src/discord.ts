@@ -79,7 +79,7 @@ type DiscordTokenResponse = {
 const DISCORD_API_BASE_URL = 'https://discord.com/api/v10';
 const DISCORD_MESSAGE_REQUEST_TIMEOUT_MS = 5000;
 export const INTERACTION_TOKEN_TTL_MS = 14 * 60 * 1000;
-const MESSAGE_STALE_AFTER_MS = 60 * 60 * 1000;
+export const MESSAGE_STALE_AFTER_MS = 60 * 60 * 1000;
 const NAME_COLUMN_WIDTH = 14;
 const MAX_DISPLAY_NAME_LENGTH = NAME_COLUMN_WIDTH - 1;
 const CATEGORY_EMOJIS = ['🟨', '🟩', '🟦', '🟪'] as const;
@@ -413,7 +413,7 @@ export async function validateDiscordAccess(
   };
 }
 
-function createActivityMessagePayload(state: ActivityMessageState) {
+export function createActivityMessagePayload(state: ActivityMessageState) {
   const playerNames = state.players.map((player) => player.displayName);
   const subject = formatPlayerList(playerNames);
   const progressLines = state.players.map(formatProgressRow).join('\n');
@@ -556,12 +556,12 @@ function getActivityMessageMetadata(state: ActivityMessageState): ActivityMessag
   };
 }
 
-function formatProgressRow(player: ActivityMessagePlayer) {
+export function formatProgressRow(player: ActivityMessagePlayer) {
   const name = formatPlayerNameForRow(player.displayName);
   return `${name.padEnd(NAME_COLUMN_WIDTH, ' ')}${formatProgressCells(player)} ${player.correctGuesses}/4`;
 }
 
-function formatPlayerNameForRow(displayName: string) {
+export function formatPlayerNameForRow(displayName: string) {
   const sanitizedName = displayName.replace(/[`\\\r\n]/g, ' ').replace(/\s+/g, ' ').trim() || 'Someone';
 
   if (sanitizedName.length <= MAX_DISPLAY_NAME_LENGTH) {
@@ -571,7 +571,7 @@ function formatPlayerNameForRow(displayName: string) {
   return `${sanitizedName.slice(0, MAX_DISPLAY_NAME_LENGTH - 1)}…`;
 }
 
-function formatProgressCells(player: ActivityMessagePlayer) {
+export function formatProgressCells(player: ActivityMessagePlayer) {
   const progressCells = player.progressCells ?? [];
   const mistakesMade = progressCells.filter((cell) => cell === null).length;
   const isFinished = player.correctGuesses >= 4 || mistakesMade >= 4;
@@ -597,7 +597,7 @@ function formatProgressCell(cell: number | null) {
   return CATEGORY_EMOJIS[cell] ?? INCORRECT_EMOJI;
 }
 
-function formatPlayerList(names: string[]) {
+export function formatPlayerList(names: string[]) {
   if (names.length === 0) {
     return 'Someone';
   }
@@ -613,7 +613,7 @@ function formatPlayerList(names: string[]) {
   return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
 }
 
-function hexToBytes(hex: string) {
+export function hexToBytes(hex: string) {
   if (hex.length % 2 !== 0 || !/^[\da-f]+$/i.test(hex)) {
     throw new Error('Invalid hex string length');
   }

@@ -120,15 +120,15 @@ export function registerConnectionsRoutes(app: App) {
   });
 }
 
-function isPuzzleDateTooFarFromToday(date: string) {
+export function isPuzzleDateTooFarFromToday(date: string) {
   return Math.abs(Date.now() - Date.parse(date)) > 1000 * 60 * 60 * 24 * 3;
 }
 
-function isDiscordSnowflake(value: string) {
+export function isDiscordSnowflake(value: string) {
   return /^\d{12,24}$/.test(value);
 }
 
-function isActivityScopeId(value: string) {
+export function isActivityScopeId(value: string) {
   const parts = value.split(':');
   if (parts.length !== 2) {
     return false;
@@ -142,6 +142,6 @@ function isActivityScopeId(value: string) {
   );
 }
 
-function getGuildIdFromActivityScope(scopeId: string) {
+export function getGuildIdFromActivityScope(scopeId: string) {
   return scopeId.startsWith('guild:') ? scopeId.slice('guild:'.length) : null;
 }

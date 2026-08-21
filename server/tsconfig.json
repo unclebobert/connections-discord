@@ -11,4 +11,11 @@
     "jsx": "react-jsx",
     "jsxImportSource": "hono/jsx"
   },
+  // Worker source only. Node types are deliberately kept out so that a Node-only API
+  // fails here rather than at deploy time — the Vitest pool injects nodejs_compat, so
+  // the test program below cannot enforce this.
+  "include": [
+    "src",
+    "worker-configuration.d.ts"
+  ]
 }

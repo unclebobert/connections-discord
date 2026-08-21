@@ -99,11 +99,16 @@ export function summarizeProgressForMessage(progress: PlayerProgress, data: Game
     const categoryIndex = positionToCategory.get(guess[0]);
     if (
       categoryIndex !== undefined &&
-      !solvedCategories.has(categoryIndex) &&
       guess.every((position) => positionToCategory.get(position) === categoryIndex)
     ) {
-      solvedCategories.add(categoryIndex);
-      progressCells.push(categoryIndex);
+      // Re-solving a category is a no-op, not a mistake. Folding the already-solved
+      // check into the correctness test above would drop such a guess into the
+      // mistake branch and render a phantom incorrect cell in the Discord grid,
+      // disagreeing with the player's own board.
+      if (!solvedCategories.has(categoryIndex)) {
+        solvedCategories.add(categoryIndex);
+        progressCells.push(categoryIndex);
+      }
       continue;
     }
 
@@ -123,4 +128,13 @@ export function isValidPuzzleDate(date: string) {
 
 function getPuzzleKey(date: string) {
   return `puzzle:${date}`;
+}
+
+/**
+ * Clears the per-isolate caches. Tests share a module instance with the Worker, so
+ * without this the caches leak between cases and make them order-dependent.
+ */
+export function resetPuzzleCaches() {
+  puzzleCache.clear();
+  writtenPuzzleKeys.clear();
 }

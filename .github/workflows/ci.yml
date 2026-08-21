@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [master, experimental]
+  pull_request:
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm exec tsc -b
+      - run: pnpm test
+
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: server/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+
+      # Worker source, without Node types, so a Node-only API fails here.
+      - run: pnpm exec tsc --noEmit -p tsconfig.json
+      # Tests and config, which legitimately need Node and the Workers test types.
+      - run: pnpm exec tsc --noEmit -p tsconfig.test.json
+
+      - run: pnpm test
+
+      # The Vitest pool injects nodejs_compat, so a suite can pass on code that
+      # cannot be deployed. This is the only step that catches that.
+      - run: pnpm exec wrangler deploy --dry-run
+
+  shared-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The progress-summary rules are implemented in both packages and asserted
+      # against a golden table that has to be duplicated, because neither package's
+      # TypeScript program can import the other's. Fail if the copies drift.
+      - run: diff client/src/__tests__/progress-summary-spec.ts server/test/progress-summary-spec.ts

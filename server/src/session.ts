@@ -43,7 +43,7 @@ type SqlUsage = {
 // moves on a routine progress update, and it is read back solely for the
 // MESSAGE_STALE_AFTER_MS check (one hour), so persisting it on every guess buys
 // nothing. Six times smaller than that window leaves plenty of margin.
-const ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS = 15 * 60 * 1000;
+export const ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS = 15 * 60 * 1000;
 
 export class ProgressRoom extends DurableObject<Bindings> {
   sql: SqlStorage;
@@ -818,17 +818,17 @@ function isActivityInteractionRequest(value: unknown): value is ActivityInteract
     typeof (value as ActivityInteractionRequest).channelId === 'string';
 }
 
-function isPlayerGuess(value: unknown): value is PlayerGuess {
+export function isPlayerGuess(value: unknown): value is PlayerGuess {
   return Array.isArray(value) &&
     value.length === 4 &&
     value.every((position) => Number.isInteger(position));
 }
 
-function areSameGuess(left: PlayerGuess, right: PlayerGuess) {
+export function areSameGuess(left: PlayerGuess, right: PlayerGuess) {
   return getGuessKey(left) === getGuessKey(right);
 }
 
-function getGuessKey(guess: PlayerGuess) {
+export function getGuessKey(guess: PlayerGuess) {
   return [...guess].sort((left, right) => left - right).join(':');
 }
 
