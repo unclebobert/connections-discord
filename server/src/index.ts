@@ -1,5 +1,6 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
+import { routePath } from 'hono/route';
 import { registerConnectionsRoutes } from './connections';
 import type { Bindings } from './env';
 import { handleDiscordInteraction } from './interactions';
@@ -8,9 +9,12 @@ const SLOW_REQUEST_MS = 1000;
 
 const app = new Hono<{ Bindings: Bindings }>();
 
-// Only failures and slow requests are logged. A start/end pair on every request
-// was the single largest contributor to the Workers Logs daily event budget, and
-// the healthy-request case is already covered by the Workers request metrics.
+// One event per request, carrying the matched route pattern rather than the concrete
+// path, so requests can be counted per endpoint without the cardinality of dates,
+// snowflakes and scope ids. Unmatched paths collapse into a single bucket, which is
+// what scanner traffic against the workers.dev hostname looks like. Worker fetch
+// invocations are thinned by observability.logs.head_sampling_rate, so this stays
+// cheap; count and scale by the inverse of that rate.
 app.use('*', async (c, next) => {
   const startedAt = Date.now();
 
@@ -18,17 +22,15 @@ app.use('*', async (c, next) => {
     await next();
   } finally {
     const durationMs = Date.now() - startedAt;
-    const status = c.res.status;
 
-    if (status >= 400 || durationMs > SLOW_REQUEST_MS) {
-      console.log('request:end', {
-        method: c.req.method,
-        path: new URL(c.req.url).pathname,
-        status,
-        durationMs,
-        rayId: c.req.header('cf-ray') ?? null,
-      });
-    }
+    console.log({
+      msg: 'request',
+      route: getRouteLabel(c),
+      method: c.req.method,
+      status: c.res.status,
+      durationMs,
+      isSlow: durationMs > SLOW_REQUEST_MS,
+    });
   }
 });
 
@@ -41,3 +43,15 @@ registerConnectionsRoutes(app);
 export default app;
 
 export { ProgressRoom } from './session';
+
+function getRouteLabel(c: Context<{ Bindings: Bindings }>) {
+  try {
+    // A request that matches no route still runs the catch-all middleware, so it
+    // reports that middleware's own pattern. Name it, rather than leaving '/*' to be
+    // decoded in a dashboard.
+    const matchedRoute = routePath(c);
+    return !matchedRoute || matchedRoute === '/*' ? 'unmatched' : matchedRoute;
+  } catch {
+    return 'unmatched';
+  }
+}

@@ -45,6 +45,15 @@ type SqlUsage = {
 // nothing. Six times smaller than that window leaves plenty of margin.
 export const ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS = 15 * 60 * 1000;
 
+// Cloudflare and Discord's activity proxy both close WebSockets that go quiet, and a
+// Connections board is quiet for minutes at a time. Browsers cannot send WebSocket
+// protocol pings from JavaScript, so the client sends this string instead and the
+// runtime answers it via setWebSocketAutoResponse — without waking the object, and
+// without the round trip costing a Worker request the way a reconnect does.
+// Must match HEARTBEAT_PING / HEARTBEAT_PONG in client/src/lib.tsx.
+export const HEARTBEAT_PING = 'ping';
+export const HEARTBEAT_PONG = 'pong';
+
 export class ProgressRoom extends DurableObject<Bindings> {
   sql: SqlStorage;
   env: Bindings;
@@ -111,6 +120,10 @@ export class ProgressRoom extends DurableObject<Bindings> {
         token_expires_at INTEGER NOT NULL
       );
     `)
+
+    this.ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(HEARTBEAT_PING, HEARTBEAT_PONG),
+    );
 
     this.userProfiles = new Map();
     const profiles = this.trackedQuery<{
@@ -333,6 +346,16 @@ export class ProgressRoom extends DurableObject<Bindings> {
       console.error('Binary messages are not supported');
       return;
     }
+
+    if (message === HEARTBEAT_PING) {
+      // The runtime should have auto-responded without waking us. Reaching here means
+      // it did not, so answer anyway: letting the client time out would cost a
+      // reconnect, which is the exact expense the heartbeat exists to avoid.
+      console.warn('progress_room:heartbeat_not_auto_answered');
+      ws.send(HEARTBEAT_PONG);
+      return;
+    }
+
     try {
       const parsed = JSON.parse(message) as Partial<ProgressGuessMessage>;
       const { guess } = parsed;
