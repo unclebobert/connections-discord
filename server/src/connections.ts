@@ -5,6 +5,10 @@ import {
 import type { App } from './env';
 import { getPuzzleData, isValidPuzzleDate } from './puzzles';
 
+// Application close codes. Must match the client's handling in App.tsx.
+export const WS_CLOSE_UNAUTHENTICATED = 4401;
+export const WS_CLOSE_FORBIDDEN = 4403;
+
 export function registerConnectionsRoutes(app: App) {
   app.get('/ws/:scopeId/:channelId/:date/:userId', async (c) => {
     const upgradeHeader = c.req.header('Upgrade');
@@ -68,7 +72,15 @@ export function registerConnectionsRoutes(app: App) {
         status: authResult.status,
         error: authResult.error,
       });
-      return c.json({ error: authResult.error }, authResult.status);
+      // 502 means Discord itself was unreachable, which is transient — let the client
+      // retry it as a normal failed handshake. 401/403 will never succeed with this
+      // token, and a browser cannot read the status of a failed WebSocket handshake,
+      // so the rejection has to be delivered over an accepted socket instead.
+      if (authResult.status === 502) {
+        return c.json({ error: authResult.error }, authResult.status);
+      }
+
+      return createAuthFailureSocket(authResult.status);
     }
 
     console.log('progress_ws:auth_ok', {
@@ -117,6 +129,27 @@ export function registerConnectionsRoutes(app: App) {
     }
 
     return c.json(tokenResult.data);
+  });
+}
+
+/**
+ * Accepts the WebSocket purely to report why it cannot be used, then closes it.
+ *
+ * Both signals are sent because neither is fully reliable on its own: a custom close
+ * code has to survive Discord's activity proxy, and a message frame has to arrive
+ * before the close is processed.
+ */
+function createAuthFailureSocket(status: 401 | 403) {
+  const pair = new WebSocketPair();
+  const server = pair[1];
+
+  server.accept();
+  server.send(JSON.stringify({ type: 'error', code: 'auth' }));
+  server.close(status === 401 ? WS_CLOSE_UNAUTHENTICATED : WS_CLOSE_FORBIDDEN, 'Authentication failed');
+
+  return new Response(null, {
+    status: 101,
+    webSocket: pair[0],
   });
 }
 

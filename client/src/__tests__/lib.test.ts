@@ -26,9 +26,8 @@ describe('getProgressWebSocketUrl', () => {
 
 describe('createProgressGuessMessage', () => {
   it('produces the wire shape the Durable Object parses', () => {
-    expect(createProgressGuessMessage('u1', 'm1', [0, 1, 2, 3])).toEqual({
+    expect(createProgressGuessMessage('u1', [0, 1, 2, 3])).toEqual({
       type: 'guess',
-      messageId: 'm1',
       userId: 'u1',
       guess: [0, 1, 2, 3],
     })
@@ -53,16 +52,6 @@ describe('parseProgressMessage', () => {
     expect(parseProgressMessage(JSON.stringify(player))).toEqual({ type: 'update', player })
   })
 
-  it('reads an ack', () => {
-    const ack = { type: 'ack', messageId: 'm1', player }
-
-    expect(parseProgressMessage(JSON.stringify(ack))).toEqual({
-      type: 'ack',
-      messageId: 'm1',
-      player,
-    })
-  })
-
   it('accepts a profile when one is present', () => {
     const withProfile = {
       userId: 'u1',
@@ -74,6 +63,19 @@ describe('parseProgressMessage', () => {
       type: 'update',
       player: withProfile,
     })
+  })
+
+  it('reads the auth error frame the server sends before closing', () => {
+    // Browsers cannot read the status of a failed WebSocket handshake, so this frame
+    // is how a rejected token is reported. Missing it would mean retrying forever.
+    expect(parseProgressMessage(JSON.stringify({ type: 'error', code: 'auth' }))).toEqual({
+      type: 'error',
+      code: 'auth',
+    })
+  })
+
+  it('ignores an error frame it does not understand', () => {
+    expect(parseProgressMessage(JSON.stringify({ type: 'error', code: 'something-else' }))).toBeNull()
   })
 
   it('returns null for the heartbeat reply rather than throwing', () => {
@@ -90,7 +92,7 @@ describe('parseProgressMessage', () => {
     ['a missing userId', JSON.stringify({ progress: [] })],
     ['a non-string userId', JSON.stringify({ userId: 7, progress: [] })],
     ['a malformed profile', JSON.stringify({ userId: 'u1', progress: [], profile: { displayName: 1 } })],
-    ['an ack without a messageId', JSON.stringify({ type: 'ack', player: { userId: 'u1', progress: [] } })],
+    ['a retired ack frame', JSON.stringify({ type: 'ack', messageId: 'm1', player: { userId: 'u1', progress: [] } })],
     ['a JSON primitive', '42'],
     ['null', 'null'],
   ])('rejects %s', (_label, payload) => {

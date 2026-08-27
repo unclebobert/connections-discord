@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import connectionsLogo from './assets/connections.svg'
 import './App.css'
 
-import { getDiscordSession, type DiscordSession } from './discord'
+import { getDiscordSession, resetDiscordSession, type DiscordSession } from './discord'
 import {
   buildCards,
   buildCardsForSolvedCategories,
@@ -20,6 +20,7 @@ import {
   type PlayCard,
   type ProgressSummary,
 } from './game'
+import { loadCachedPuzzle, saveCachedPuzzle } from './storage'
 import {
   API_BASE_URL,
   createProgressGuessMessage,
@@ -55,7 +56,6 @@ const SOLVED_GROUP_ENTER_Y = 10
 const TITLE_ENTER_Y = 10
 const TOTAL_CATEGORIES = 4
 const PROGRESS_RESTORE_TIMEOUT_MS = 8000
-const PROGRESS_SAVE_WARNING_TIMEOUT_MS = 6000
 const PROGRESS_SAVE_WARNING_TOAST_MS = 3000
 // Comfortably inside the idle timeouts applied by Cloudflare and by Discord's
 // activity proxy, neither of which is documented precisely.
@@ -64,8 +64,9 @@ const PROGRESS_HEARTBEAT_TIMEOUT_MS = 10000
 const PROGRESS_RECONNECT_BASE_DELAY_MS = 1000
 const PROGRESS_RECONNECT_MAX_DELAY_MS = 60000
 const PROGRESS_STABLE_CONNECTION_MS = 30000
-const PENDING_PROGRESS_QUEUE_KEY_PREFIX = 'connections:pending-progress:'
-const MAX_PENDING_PROGRESS_GUESSES = 12
+// Must match WS_CLOSE_UNAUTHENTICATED / WS_CLOSE_FORBIDDEN in server/src/connections.ts.
+const WS_CLOSE_UNAUTHENTICATED = 4401
+const WS_CLOSE_FORBIDDEN = 4403
 
 type GuessAnimation = 'correct' | 'incorrect'
 type GuessPhase = 'idle' | 'jump' | 'shake' | 'swap'
@@ -85,98 +86,6 @@ interface ProgressState {
 }
 
 type ProgressPlayer = ObservedProgress & ProgressSummary
-type PendingProgressGuess = {
-  id: string
-  guess: PlayerGuess
-  isFinal: boolean
-}
-
-function flushProgressQueue(
-  socket: WebSocket,
-  userId: string,
-  pendingGuesses: { current: PendingProgressGuess[] },
-  sentGuessIds: { current: Set<string> },
-) {
-  for (const pendingGuess of pendingGuesses.current) {
-    if (socket.readyState !== WebSocket.OPEN) {
-      return
-    }
-
-    if (sentGuessIds.current.has(pendingGuess.id)) {
-      continue
-    }
-
-    try {
-      socket.send(JSON.stringify(createProgressGuessMessage(userId, pendingGuess.id, pendingGuess.guess)))
-      sentGuessIds.current.add(pendingGuess.id)
-    } catch (error) {
-      sentGuessIds.current.delete(pendingGuess.id)
-      console.error('Unable to send progress update:', error)
-      return
-    }
-  }
-}
-
-function createProgressGuessId() {
-  if (typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-}
-
-function getPendingProgressQueueKey(connectionKey: string) {
-  return `${PENDING_PROGRESS_QUEUE_KEY_PREFIX}${connectionKey}`
-}
-
-function loadPendingProgressGuesses(connectionKey: string): PendingProgressGuess[] {
-  try {
-    const rawValue = localStorage.getItem(getPendingProgressQueueKey(connectionKey))
-    if (!rawValue) {
-      return []
-    }
-
-    const parsed: unknown = JSON.parse(rawValue)
-    if (!Array.isArray(parsed)) {
-      return []
-    }
-
-    return parsed.filter(isPendingProgressGuess).slice(0, MAX_PENDING_PROGRESS_GUESSES)
-  } catch (error) {
-    console.warn('Unable to load pending progress updates:', error)
-    return []
-  }
-}
-
-function savePendingProgressGuesses(connectionKey: string, pendingGuesses: PendingProgressGuess[]) {
-  try {
-    const storageKey = getPendingProgressQueueKey(connectionKey)
-    if (pendingGuesses.length === 0) {
-      localStorage.removeItem(storageKey)
-      return
-    }
-
-    localStorage.setItem(
-      storageKey,
-      JSON.stringify(pendingGuesses.slice(-MAX_PENDING_PROGRESS_GUESSES)),
-    )
-  } catch (error) {
-    console.warn('Unable to save pending progress updates:', error)
-  }
-}
-
-function isPendingProgressGuess(value: unknown): value is PendingProgressGuess {
-  return typeof value === 'object' &&
-    value !== null &&
-    'id' in value &&
-    'guess' in value &&
-    'isFinal' in value &&
-    typeof value.id === 'string' &&
-    Array.isArray(value.guess) &&
-    value.guess.length === 4 &&
-    value.guess.every((position) => Number.isInteger(position)) &&
-    typeof value.isFinal === 'boolean'
-}
 
 function upsertObservedProgress(
   currentPlayers: ObservedProgress[],
@@ -295,12 +204,18 @@ function getProgressRows(player: ProgressPlayer, categories: GameCategory[]) {
 }
 
 function App() {
-  const [data, setData] = useState<GameData | null>(null)
+  const puzzleDate = useMemo(() => formatPuzzleDate(new Date()), [])
+  // Seeding state directly avoids a cascading render, and means a cached puzzle is on
+  // the board for the very first paint rather than one frame later.
+  const cachedPuzzle = useMemo(() => loadCachedPuzzle(puzzleDate), [puzzleDate])
+  const [data, setData] = useState<GameData | null>(cachedPuzzle)
   const [error, setError] = useState<string | null>(null)
   const [hasStarted, setHasStarted] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [solvedCategories, setSolvedCategories] = useState<number[]>([])
-  const [boardCards, setBoardCards] = useState<PlayCard[]>([])
+  const [boardCards, setBoardCards] = useState<PlayCard[]>(
+    () => (cachedPuzzle ? buildCards(cachedPuzzle.categories) : []),
+  )
   const [submittedGuesses, setSubmittedGuesses] = useState<PlayerProgress>([])
   const [mistakesRemaining, setMistakesRemaining] = useState(MAX_MISTAKES)
   const [isGameOver, setIsGameOver] = useState(false)
@@ -311,6 +226,7 @@ function App() {
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null)
   const [discordSession, setDiscordSession] = useState<DiscordSession | null>(null)
   const [isDiscordReady, setIsDiscordReady] = useState(false)
+  const [sessionEpoch, setSessionEpoch] = useState(0)
   const [progressState, setProgressState] = useState<ProgressState>({
     connectionKey: null,
     players: [],
@@ -328,14 +244,11 @@ function App() {
   } | null>(null)
   const animationTimers = useRef<number[]>([])
   const toastTimer = useRef<number | null>(null)
-  const progressSaveWarningTimer = useRef<number | null>(null)
   const progressSocket = useRef<WebSocket | null>(null)
   const ensureProgressSocket = useRef<(() => void) | null>(null)
-  const pendingProgressGuesses = useRef<PendingProgressGuess[]>([])
-  const sentProgressGuessIds = useRef<Set<string>>(new Set())
   const hasReportedFinalGuess = useRef(false)
+  const hasRetriedAuth = useRef(false)
   const hydratedProgressKey = useRef<string | null>(null)
-  const puzzleDate = useMemo(() => formatPuzzleDate(new Date()), [])
   const progressScopeId = discordSession?.channelId
     ? getActivityScopeId(discordSession.guildId, discordSession.channelId)
     : null
@@ -360,6 +273,13 @@ function App() {
   }), [layoutPhase])
 
   useEffect(() => {
+    // A published puzzle never changes, so a cached copy is always current. Players
+    // reopen the Activity through the day to check on friends, and each reopen would
+    // otherwise refetch the same payload.
+    if (cachedPuzzle) {
+      return
+    }
+
     const controller = new AbortController()
 
     async function loadPuzzle() {
@@ -373,6 +293,7 @@ function App() {
         }
 
         const gameData = await response.json() as GameData
+        saveCachedPuzzle(puzzleDate, gameData)
         setData(gameData)
         setBoardCards(buildCards(gameData.categories))
       } catch (fetchError) {
@@ -390,7 +311,7 @@ function App() {
     return () => {
       controller.abort()
     }
-  }, [puzzleDate])
+  }, [cachedPuzzle, puzzleDate])
 
   useEffect(() => {
     if (!hasStarted) {
@@ -416,17 +337,13 @@ function App() {
     return () => {
       isCancelled = true
     }
-  }, [hasStarted])
+  }, [hasStarted, sessionEpoch])
 
   useEffect(() => () => {
     animationTimers.current.forEach((timer) => window.clearTimeout(timer))
 
     if (toastTimer.current !== null) {
       window.clearTimeout(toastTimer.current)
-    }
-
-    if (progressSaveWarningTimer.current !== null) {
-      window.clearTimeout(progressSaveWarningTimer.current)
     }
 
     progressSocket.current?.close()
@@ -444,8 +361,6 @@ function App() {
       : null
 
     if (!scopeId || !channelId || !userId || !accessToken || !connectionKey) {
-      pendingProgressGuesses.current = []
-      sentProgressGuessIds.current.clear()
       ensureProgressSocket.current = null
       hasReportedFinalGuess.current = false
       return
@@ -457,9 +372,7 @@ function App() {
     const activeAccessToken = accessToken
     const activeConnectionKey = connectionKey
 
-    pendingProgressGuesses.current = loadPendingProgressGuesses(activeConnectionKey)
-    sentProgressGuessIds.current.clear()
-    hasReportedFinalGuess.current = pendingProgressGuesses.current.some((pendingGuess) => pendingGuess.isFinal)
+    hasReportedFinalGuess.current = false
 
     let socket: WebSocket | null = null
     let hasReceivedSnapshot = false
@@ -479,19 +392,21 @@ function App() {
       }
     }, PROGRESS_RESTORE_TIMEOUT_MS)
 
-    function acknowledgeProgressGuess(messageId: string) {
-      const previousLength = pendingProgressGuesses.current.length
-      pendingProgressGuesses.current = pendingProgressGuesses.current.filter((pendingGuess) => pendingGuess.id !== messageId)
-      sentProgressGuessIds.current.delete(messageId)
+    function handleAuthFailure() {
+      isCancelled = true
+      socket?.close()
+      progressSocket.current = null
 
-      if (pendingProgressGuesses.current.length !== previousLength) {
-        savePendingProgressGuesses(activeConnectionKey, pendingProgressGuesses.current)
+      if (hasRetriedAuth.current) {
+        // A freshly-issued token was rejected too, so this is a real permission
+        // problem (not in the guild, scopes revoked) rather than a stale cache.
+        markRestoreUnavailable()
+        return
       }
 
-      if (pendingProgressGuesses.current.length === 0 && progressSaveWarningTimer.current !== null) {
-        window.clearTimeout(progressSaveWarningTimer.current)
-        progressSaveWarningTimer.current = null
-      }
+      hasRetriedAuth.current = true
+      resetDiscordSession()
+      setSessionEpoch((currentEpoch) => currentEpoch + 1)
     }
 
     function stopHeartbeat() {
@@ -595,7 +510,6 @@ function App() {
         activeAccessToken,
       ))
       socket = nextSocket
-      sentProgressGuessIds.current.clear()
       progressSocket.current = nextSocket
 
       nextSocket.addEventListener('open', () => {
@@ -613,7 +527,6 @@ function App() {
           }
         }, PROGRESS_STABLE_CONNECTION_MS)
         startHeartbeat(nextSocket)
-        flushProgressQueue(nextSocket, activeUserId, pendingProgressGuesses, sentProgressGuessIds)
       })
       nextSocket.addEventListener('close', (event) => {
         const isCurrentSocket = progressSocket.current === nextSocket
@@ -634,6 +547,11 @@ function App() {
           wasClean: event.wasClean,
         })
         if (!isCurrentSocket) {
+          return
+        }
+
+        if (event.code === WS_CLOSE_UNAUTHENTICATED || event.code === WS_CLOSE_FORBIDDEN) {
+          handleAuthFailure()
           return
         }
 
@@ -665,6 +583,11 @@ function App() {
           return
         }
 
+        if (message.type === 'error') {
+          handleAuthFailure()
+          return
+        }
+
         if (message.type === 'snapshot') {
           hasReceivedSnapshot = true
           window.clearTimeout(restoreTimeout)
@@ -676,10 +599,6 @@ function App() {
             connectionKey: activeConnectionKey,
             status: 'ready',
           })
-        }
-
-        if (message.type === 'ack') {
-          acknowledgeProgressGuess(message.messageId)
         }
 
         setProgressState((currentState) => ({
@@ -699,7 +618,6 @@ function App() {
     function ensureProgressSocketIsOpen() {
       const currentSocket = progressSocket.current
       if (currentSocket?.readyState === WebSocket.OPEN) {
-        flushProgressQueue(currentSocket, activeUserId, pendingProgressGuesses, sentProgressGuessIds)
         return
       }
 
@@ -736,11 +654,6 @@ function App() {
       }
 
       stopHeartbeat()
-
-      if (progressSaveWarningTimer.current !== null) {
-        window.clearTimeout(progressSaveWarningTimer.current)
-        progressSaveWarningTimer.current = null
-      }
 
       if (progressSocket.current === socket) {
         progressSocket.current = null
@@ -820,9 +733,7 @@ function App() {
     const summary = summarizeProgress(ownSnapshotProgress.progress, data.categories)
 
     hydratedProgressKey.current = progressConnectionKey
-    hasReportedFinalGuess.current = summary.isWon ||
-      summary.isGameOver ||
-      pendingProgressGuesses.current.some((pendingGuess) => pendingGuess.isFinal)
+    hasReportedFinalGuess.current = summary.isWon || summary.isGameOver
     setSelectedIds([])
     setSubmittedGuesses(ownSnapshotProgress.progress)
     setSolvedCategories(summary.solvedCategories)
@@ -856,22 +767,6 @@ function App() {
     }, duration)
   }
 
-  function scheduleProgressSaveWarning() {
-    if (pendingProgressGuesses.current.length === 0 || progressSaveWarningTimer.current !== null) {
-      return
-    }
-
-    progressSaveWarningTimer.current = window.setTimeout(() => {
-      progressSaveWarningTimer.current = null
-      if (pendingProgressGuesses.current.length === 0) {
-        return
-      }
-
-      showToast('Progress connection lost. Retrying...', PROGRESS_SAVE_WARNING_TOAST_MS)
-      ensureProgressSocket.current?.()
-    }, PROGRESS_SAVE_WARNING_TIMEOUT_MS)
-  }
-
   function recordOwnProgressGuess(guess: PlayerGuess) {
     if (!discordSession || !progressConnectionKey) {
       return
@@ -893,30 +788,31 @@ function App() {
     })
   }
 
-  function queueProgressGuess(guess: PlayerGuess, isFinalGuess: boolean) {
+  function sendProgressGuess(guess: PlayerGuess, isFinalGuess: boolean) {
     if (!discordSession || !progressConnectionKey || hasReportedFinalGuess.current) {
       return
     }
 
-    const pendingGuess = {
-      id: createProgressGuessId(),
-      guess,
-      isFinal: isFinalGuess,
-    } satisfies PendingProgressGuess
-
     recordOwnProgressGuess(guess)
-    pendingProgressGuesses.current = [
-      ...pendingProgressGuesses.current,
-      pendingGuess,
-    ].slice(-MAX_PENDING_PROGRESS_GUESSES)
-    savePendingProgressGuesses(progressConnectionKey, pendingProgressGuesses.current)
 
-    if (progressSocket.current?.readyState === WebSocket.OPEN) {
-      flushProgressQueue(progressSocket.current, discordSession.user.id, pendingProgressGuesses, sentProgressGuessIds)
-    } else {
+    const socket = progressSocket.current
+    if (socket?.readyState !== WebSocket.OPEN) {
+      // Guesses made while disconnected are not persisted. Queueing them for replay
+      // let the board and the server diverge: the snapshot on reconnect arrives before
+      // the replay, hydrates the board from stale progress, and then never re-hydrates,
+      // so already-played guesses became selectable again.
+      showToast('Not connected \u2014 this guess will not be saved.', PROGRESS_SAVE_WARNING_TOAST_MS)
       ensureProgressSocket.current?.()
+      return
     }
-    scheduleProgressSaveWarning()
+
+    try {
+      socket.send(JSON.stringify(createProgressGuessMessage(discordSession.user.id, guess)))
+    } catch (error) {
+      console.error('Unable to send progress update:', error)
+      showToast('Not connected \u2014 this guess will not be saved.', PROGRESS_SAVE_WARNING_TOAST_MS)
+      return
+    }
 
     if (isFinalGuess) {
       hasReportedFinalGuess.current = true
@@ -979,7 +875,7 @@ function App() {
       const hasWon = nextSolvedCategories.length === data.categories.length
 
       setSubmittedGuesses((currentGuesses) => [...currentGuesses, guess])
-      queueProgressGuess(guess, hasWon)
+      sendProgressGuess(guess, hasWon)
       setActiveGuessIds(submittedIds)
       setGuessAnimation('correct')
       setGuessPhase('jump')
@@ -1022,7 +918,7 @@ function App() {
     const nextMistakesRemaining = mistakesRemaining - 1
 
     setSubmittedGuesses((currentGuesses) => [...currentGuesses, guess])
-    queueProgressGuess(guess, nextMistakesRemaining === 0)
+    sendProgressGuess(guess, nextMistakesRemaining === 0)
     setMistakesRemaining(nextMistakesRemaining)
     setActiveGuessIds(submittedIds)
     setGuessAnimation('incorrect')

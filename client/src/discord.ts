@@ -1,4 +1,9 @@
 import { DiscordSDK } from '@discord/embedded-app-sdk'
+import {
+  clearCachedAccessToken,
+  loadCachedAccessToken,
+  saveCachedAccessToken,
+} from './storage'
 
 type DiscordAuth = Awaited<ReturnType<DiscordSDK['commands']['authenticate']>>
 
@@ -23,6 +28,20 @@ async function setupDiscordSDK(): Promise<DiscordSession | null> {
   await discordSDK.ready()
   console.log('Discord SDK is ready!')
 
+  // Reusing a token skips both the authorize round trip and the server-side code
+  // exchange. Discord tokens outlive a single Activity session by days, and players
+  // reopen the Activity repeatedly, so most opens can avoid /token entirely.
+  const cachedAccessToken = loadCachedAccessToken()
+  if (cachedAccessToken) {
+    const session = await authenticateWithToken(discordSDK, cachedAccessToken)
+    if (session) {
+      return session
+    }
+
+    // Revoked, expired early, or issued to a different Discord account.
+    clearCachedAccessToken()
+  }
+
   const { code } = await discordSDK.commands.authorize({
     client_id: DISCORD_CLIENT_ID,
     response_type: 'code',
@@ -43,24 +62,52 @@ async function setupDiscordSDK(): Promise<DiscordSession | null> {
       code,
     }),
   })
-  const { access_token } = await response.json()
+  const { access_token, expires_in } = await response.json()
 
-  const auth = await discordSDK.commands.authenticate({ access_token })
-  if (!auth) {
+  const session = await authenticateWithToken(discordSDK, access_token)
+  if (!session) {
     throw new Error('Failed to authenticate with Discord SDK')
   }
 
-  console.log('Authenticated with Discord SDK', auth)
+  saveCachedAccessToken(access_token, expires_in)
 
-  return {
-    accessToken: auth.access_token,
-    guildId: discordSDK.guildId,
-    channelId: discordSDK.channelId,
-    user: auth.user,
+  return session
+}
+
+async function authenticateWithToken(
+  sdk: DiscordSDK,
+  accessToken: string,
+): Promise<DiscordSession | null> {
+  try {
+    const auth = await sdk.commands.authenticate({ access_token: accessToken })
+    if (!auth) {
+      return null
+    }
+
+    return {
+      accessToken: auth.access_token,
+      guildId: sdk.guildId,
+      channelId: sdk.channelId,
+      user: auth.user,
+    }
+  } catch (error) {
+    console.warn('Discord authentication failed for this access token:', error)
+    return null
   }
 }
 
 let discordSessionPromise: Promise<DiscordSession | null> | null = null
+
+/**
+ * Discards the memoised session and the cached token, so the next getDiscordSession()
+ * runs the full authorize/exchange flow. Used when the server rejects a token that
+ * Discord itself accepted — for example one belonging to a user who is not in this
+ * guild, which no amount of retrying will fix.
+ */
+export function resetDiscordSession() {
+  discordSessionPromise = null
+  clearCachedAccessToken()
+}
 
 export function getDiscordSession() {
   discordSessionPromise ??= setupDiscordSDK()

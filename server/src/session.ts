@@ -25,7 +25,6 @@ type ActivityInteractionRequest = {
   channelId: string;
 };
 type ProgressGuessMessage = {
-  messageId?: string;
   guess: PlayerGuess;
 };
 type ActivityMessageUpdate = {
@@ -359,7 +358,6 @@ export class ProgressRoom extends DurableObject<Bindings> {
     try {
       const parsed = JSON.parse(message) as Partial<ProgressGuessMessage>;
       const { guess } = parsed;
-      const messageId = typeof parsed.messageId === 'string' ? parsed.messageId : null;
       if (!isPlayerGuess(guess)) {
         console.error('Invalid guess format');
         return;
@@ -367,10 +365,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
       const attachment = this.getSocketAttachment(ws);
       // No log here: `progress:guess_saved` below carries the same fields, and this
       // handler is the highest-frequency event in the system.
-      const { progress, wasSaved } = this.saveGuess(attachment, guess);
-      if (messageId) {
-        this.sendProgressAck(ws, messageId, attachment.userId, progress);
-      }
+      const { wasSaved } = this.saveGuess(attachment, guess);
       if (wasSaved) {
         this.queueActivityMessageUpdateForPlayer(
           attachment.userId,
@@ -549,30 +544,6 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
 
     return { progress, wasSaved: true };
-  }
-
-  sendProgressAck(ws: WebSocket, messageId: string, userId: string, progress: PlayerProgress) {
-    if (ws.readyState !== WebSocket.OPEN) {
-      return;
-    }
-
-    try {
-      ws.send(JSON.stringify({
-        type: 'ack',
-        messageId,
-        player: {
-          userId,
-          progress,
-          profile: this.userProfiles.get(userId) ?? null,
-        },
-      }));
-    } catch (error) {
-      console.error('progress_room:ack_failed', {
-        userId,
-        messageId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 
   queueActivityMessageUpdateForPlayer(userId: string, scopeId: string, channelId: string, date: string) {
