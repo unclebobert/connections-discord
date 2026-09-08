@@ -31,3 +31,9 @@ lerna-debug.log*
 
 # misc
 .DS_Store
+
+# Local database and build output
+data/
+dist/
+*.sqlite
+*.sqlite-*

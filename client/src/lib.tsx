@@ -14,16 +14,11 @@ export interface GameData {
   categories: GameCategory[]
 }
 
-export const API_BASE_URL = import.meta.env.DEV ?
-  'https://connections-discord-server.unclebobert.workers.dev' :
-  '/api'
-
-// Browsers cannot send WebSocket protocol pings from JavaScript, so the connection is
-// kept alive with an application-level message that the Durable Object answers via
-// setWebSocketAutoResponse — no wake-up, and no Worker request the way a reconnect is.
-// Must match HEARTBEAT_PING / HEARTBEAT_PONG in server/src/session.ts.
-export const HEARTBEAT_PING = 'ping'
-export const HEARTBEAT_PONG = 'pong'
+// In production the Discord activity proxy maps /api to the server host. In dev,
+// point at a locally running server unless overridden.
+export const API_BASE_URL = import.meta.env.DEV
+  ? (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787')
+  : '/api'
 
 export type PlayerGuess = [number, number, number, number]
 export type PlayerProgress = PlayerGuess[]

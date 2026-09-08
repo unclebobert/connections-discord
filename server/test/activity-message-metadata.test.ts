@@ -1,17 +1,20 @@
-import { evictDurableObject, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
-import { ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS, type ProgressRoom } from '../src/session';
-import { MESSAGE_STALE_AFTER_MS } from '../src/discord';
-import { CHANNEL_ID, DATE, SCOPE_ID, progressRoom, resetUsage, rowsWritten } from './helpers';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { MESSAGE_STALE_AFTER_MS } from '../src/discord.ts';
+import type { Database } from '../src/db.ts';
+import type { ProgressRoom } from '../src/session.ts';
+import { CHANNEL_ID, DATE, SCOPE_ID, callsFor, createRoom, createTestDatabase, resetUsage } from './helpers.ts';
 
 /**
- * activity_message_update was the single largest consumer of rows written (43% of the
- * daily total), because the metadata row was rewritten on every guess even though only
- * last_updated_at had moved. Persisting that column lazily is what removed the cost —
- * at the price of the stored value lagging reality, which these tests bound.
+ * The Durable Object version persisted `last_updated_at` lazily to save billed row
+ * writes, which let the stored timestamp fall behind reality across an eviction. That
+ * scheme is gone; these tests pin the behaviour that replaced it — every update is
+ * durable immediately, and a restart sees exactly what was written.
  */
 
-const baseMetadata = (overrides: Partial<{ messageId: string; interactionToken: string; tokenExpiresAt: number; lastUpdatedAt: number }> = {}) => ({
+let db: Database;
+let room: ProgressRoom;
+
+const metadata = (overrides: Partial<{ messageId: string; interactionToken: string; tokenExpiresAt: number; lastUpdatedAt: number }> = {}) => ({
   scopeId: SCOPE_ID,
   channelId: CHANNEL_ID,
   date: DATE,
@@ -22,94 +25,64 @@ const baseMetadata = (overrides: Partial<{ messageId: string; interactionToken: 
   ...overrides,
 });
 
+beforeEach(() => {
+  db = createTestDatabase();
+  room = createRoom(db);
+});
+
 describe('metadata persistence', () => {
-  it('writes on the first save and skips when only lastUpdatedAt moved', async () => {
-    await runInDurableObject(progressRoom('guild:meta-skip'), (room: ProgressRoom) => {
-      resetUsage(room);
-      room.saveActivityMessageMetadata(baseMetadata());
-      expect(rowsWritten(room)).toBe(2);
-
-      resetUsage(room);
-      room.saveActivityMessageMetadata(baseMetadata({ lastUpdatedAt: 1_000 + 60_000 }));
-      expect(rowsWritten(room)).toBe(0);
-    });
+  it('has nothing to report before a message exists', () => {
+    expect(room.getActivityMessageMetadata(SCOPE_ID, CHANNEL_ID, DATE)).toBeNull();
   });
 
-  it('always writes when the message identity changes', async () => {
-    await runInDurableObject(progressRoom('guild:meta-identity'), (room: ProgressRoom) => {
-      room.saveActivityMessageMetadata(baseMetadata());
+  it('round-trips through the in-memory cache while the process is alive', () => {
+    room.saveActivityMessageMetadata(metadata());
+    room.saveActivityMessageMetadata(metadata({ lastUpdatedAt: 61_000 }));
 
-      resetUsage(room);
-      room.saveActivityMessageMetadata(baseMetadata({ messageId: 'message-2' }));
-      expect(rowsWritten(room)).toBe(1);
-
-      resetUsage(room);
-      room.saveActivityMessageMetadata(baseMetadata({ messageId: 'message-2', interactionToken: 'token-2' }));
-      expect(rowsWritten(room)).toBe(1);
-
-      resetUsage(room);
-      room.saveActivityMessageMetadata(
-        baseMetadata({ messageId: 'message-2', interactionToken: 'token-2', tokenExpiresAt: 2_000_000 }),
-      );
-      expect(rowsWritten(room)).toBe(1);
-    });
+    expect(room.getActivityMessageMetadata(SCOPE_ID, CHANNEL_ID, DATE)?.lastUpdatedAt).toBe(61_000);
   });
 
-  it('writes again once the persist interval has elapsed', async () => {
-    await runInDurableObject(progressRoom('guild:meta-interval'), (room: ProgressRoom) => {
-      room.saveActivityMessageMetadata(baseMetadata());
+  it('persists every update, so a restart loses nothing', () => {
+    room.saveActivityMessageMetadata(metadata());
+    room.saveActivityMessageMetadata(metadata({ lastUpdatedAt: 61_000 }));
 
-      resetUsage(room);
-      room.saveActivityMessageMetadata(
-        baseMetadata({ lastUpdatedAt: 1_000 + ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS }),
-      );
-      expect(rowsWritten(room)).toBe(1);
-    });
+    const restarted = createRoom(db);
+    const restored = restarted.getActivityMessageMetadata(SCOPE_ID, CHANNEL_ID, DATE);
+
+    expect(restored).not.toBeNull();
+    expect(restored!.messageId).toBe('message-1');
+    expect(restored!.interactionToken).toBe('token-1');
+    // Exact, not merely within a staleness window — the lag the old scheme allowed is
+    // what could make a live message look stale and post a duplicate.
+    expect(restored!.lastUpdatedAt).toBe(61_000);
+    expect(MESSAGE_STALE_AFTER_MS - (61_000 - restored!.lastUpdatedAt)).toBe(MESSAGE_STALE_AFTER_MS);
   });
 
-  it('serves the in-memory value while the object is alive', async () => {
-    await runInDurableObject(progressRoom('guild:meta-warm'), (room: ProgressRoom) => {
-      room.saveActivityMessageMetadata(baseMetadata());
-      room.saveActivityMessageMetadata(baseMetadata({ lastUpdatedAt: 61_000 }));
+  it('reads from storage only once per channel and date', () => {
+    room.saveActivityMessageMetadata(metadata());
 
-      // Not persisted, but reads must still see it or the object would act on a
-      // staler timestamp than it actually knows about.
-      expect(room.getActivityMessageMetadata(SCOPE_ID, CHANNEL_ID, DATE)?.lastUpdatedAt).toBe(61_000);
-    });
+    const restarted = createRoom(db);
+    resetUsage(restarted);
+    restarted.getActivityMessageMetadata(SCOPE_ID, CHANNEL_ID, DATE);
+    restarted.getActivityMessageMetadata(SCOPE_ID, CHANNEL_ID, DATE);
+
+    expect(callsFor(restarted, 'activity_messages:get')).toBe(1);
   });
 });
 
-describe('surviving hibernation', () => {
-  it('restores metadata that lags by no more than the persist interval', async () => {
-    const stub = progressRoom('guild:meta-evict');
-    const start = 5_000_000;
-    const latest = start + 5 * 60_000;
+describe('launch tokens', () => {
+  it('stores the newest token and survives a restart', () => {
+    room.saveLatestActivityLaunchToken(SCOPE_ID, CHANNEL_ID, 'token-1');
+    room.saveLatestActivityLaunchToken(SCOPE_ID, CHANNEL_ID, 'token-2');
 
-    await runInDurableObject(stub, (room: ProgressRoom) => {
-      room.saveActivityMessageMetadata(baseMetadata({ lastUpdatedAt: start }));
-      // Five updates that all skip the write.
-      for (let minute = 1; minute <= 5; minute += 1) {
-        room.saveActivityMessageMetadata(baseMetadata({ lastUpdatedAt: start + minute * 60_000 }));
-      }
-    });
+    const restarted = createRoom(db);
+    const stored = restarted.getLatestActivityLaunchToken(CHANNEL_ID);
 
-    await evictDurableObject(stub);
-
-    await runInDurableObject(stub, (room: ProgressRoom) => {
-      const restored = room.getActivityMessageMetadata(SCOPE_ID, CHANNEL_ID, DATE);
-
-      expect(restored).not.toBeNull();
-      expect(restored!.messageId).toBe('message-1');
-      expect(restored!.interactionToken).toBe('token-1');
-      expect(latest - restored!.lastUpdatedAt).toBeLessThanOrEqual(ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS);
-    });
+    expect(stored?.interactionToken).toBe('token-2');
+    expect(stored!.tokenExpiresAt).toBeGreaterThan(Date.now());
   });
 
-  it('cannot lag far enough to make a live message look stale', () => {
-    // sendActivityLaunchMessage refuses to edit a message older than
-    // MESSAGE_STALE_AFTER_MS and posts a fresh one instead. If the persist interval
-    // ever grew past that window, lazy persistence would start spamming the channel
-    // with duplicate "Play now!" messages after a hibernation.
-    expect(ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS).toBeLessThan(MESSAGE_STALE_AFTER_MS);
+  it('reports nothing for a channel that has never launched', () => {
+    expect(room.getLatestActivityLaunchToken('999999999999999999')).toBeNull();
   });
 });

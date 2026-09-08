@@ -6,7 +6,7 @@ import {
   formatProgressCells,
   formatProgressRow,
   hexToBytes,
-} from '../src/discord';
+} from '../src/discord.ts';
 
 const player = (overrides: Partial<{ displayName: string; correctGuesses: number; progressCells: Array<number | null> }> = {}) => ({
   userId: 'u1',

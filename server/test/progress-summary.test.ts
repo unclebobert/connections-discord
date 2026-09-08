@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { summarizeProgressForMessage, type PlayerProgress } from '../src/puzzles';
-import { CATEGORY_POSITIONS, SUMMARY_VECTORS } from './progress-summary-spec';
+import { summarizeProgressForMessage, type PlayerProgress } from '../src/puzzles.ts';
+import { CATEGORY_POSITIONS, SUMMARY_VECTORS } from './progress-summary-spec.ts';
 
 const data = {
   categories: CATEGORY_POSITIONS.map((positions) => ({

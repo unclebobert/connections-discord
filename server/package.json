@@ -2,20 +2,22 @@
   "name": "server",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy --minify",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "dev": "node --watch src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/server.cjs",
+    "start": "node dist/server.cjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "hono": "^4.12.19"
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.12.19",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@types/node": "^26.2.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11",
-    "wrangler": "^4.4.0"
+    "vitest": "^4.1.11"
   }
 }

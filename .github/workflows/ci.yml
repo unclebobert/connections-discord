@@ -14,8 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -34,25 +32,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
       - uses: actions/setup-node@v5
         with:
+          # node:sqlite needs a current Node; this must match the runtime on the VPS.
           node-version: 22
           cache: pnpm
           cache-dependency-path: server/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-
-      # Worker source, without Node types, so a Node-only API fails here.
-      - run: pnpm exec tsc --noEmit -p tsconfig.json
-      # Tests and config, which legitimately need Node and the Workers test types.
-      - run: pnpm exec tsc --noEmit -p tsconfig.test.json
-
+      - run: pnpm typecheck
       - run: pnpm test
-
-      # The Vitest pool injects nodejs_compat, so a suite can pass on code that
-      # cannot be deployed. This is the only step that catches that.
-      - run: pnpm exec wrangler deploy --dry-run
+      # Catches anything that typechecks but cannot actually be bundled for deployment.
+      - run: pnpm build
 
   shared-spec:
     runs-on: ubuntu-latest

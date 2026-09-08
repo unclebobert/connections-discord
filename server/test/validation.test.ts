@@ -4,9 +4,9 @@ import {
   isActivityScopeId,
   isDiscordSnowflake,
   isPuzzleDateTooFarFromToday,
-} from '../src/connections';
-import { areSameGuess, getGuessKey, isPlayerGuess } from '../src/session';
-import { isValidPuzzleDate } from '../src/puzzles';
+} from '../src/connections.ts';
+import { areSameGuess, getGuessKey, isPlayerGuess } from '../src/session.ts';
+import { isValidPuzzleDate } from '../src/puzzles.ts';
 
 // These guard the only inputs a client controls directly: the WebSocket URL path and
 // the guess payload.

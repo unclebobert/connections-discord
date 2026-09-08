@@ -1,4 +1,3 @@
-import type { Bindings } from './env';
 
 export type DiscordUser = {
   id: string;
@@ -68,8 +67,11 @@ export type ActivityLaunchTokenState = {
   tokenExpiresAt: number;
 };
 
-type ActivityMessageEnv = Pick<Bindings, 'PROGRESS_ROOMS' | 'VITE_DISCORD_CLIENT_ID'>;
-type DiscordApiEnv = Pick<Bindings, 'VITE_DISCORD_CLIENT_ID'>;
+/** Replaces the Workers `Bindings`; these are plain config values now. */
+export type DiscordCredentials = {
+  clientId: string;
+  clientSecret: string;
+};
 
 type DiscordTokenResponse = {
   access_token?: string;
@@ -139,37 +141,8 @@ function getDiscordAvatarUrl(user: DiscordUser | undefined) {
   return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=80`;
 }
 
-export async function storeActivityLaunchTokenForInteraction(
-  env: ActivityMessageEnv,
-  interactionToken: string,
-  context: InteractionLaunchContext,
-) {
-  const room = env.PROGRESS_ROOMS.getByName(context.scopeId);
-  const response = await room.fetch('https://progress-room/activity/launch-token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      interactionToken,
-      scopeId: context.scopeId,
-      channelId: context.channelId,
-    }),
-  });
-
-  if (!response.ok) {
-    console.error('activity_message:store_launch_token_failed', {
-      scopeId: context.scopeId,
-      guildId: context.guildId,
-      channelId: context.channelId,
-      status: response.status,
-      body: await response.text(),
-    });
-  }
-}
-
 export async function sendActivityLaunchMessage(
-  env: DiscordApiEnv,
+  credentials: DiscordCredentials,
   options: {
     scopeId: string;
     channelId: string;
@@ -206,7 +179,7 @@ export async function sendActivityLaunchMessage(
     // The attempt is not logged separately: `edit_sent` and `edit_failed` between
     // them cover every outcome, and this path runs on every guess.
     const didEdit = await editInteractionFollowup(
-      env,
+      credentials,
       state.interactionToken!,
       state.messageId!,
       createActivityMessagePayload(state),
@@ -245,7 +218,7 @@ export async function sendActivityLaunchMessage(
     playerCount: state.players.length,
   });
   const message = await createInteractionFollowup(
-    env,
+    credentials,
     options.interactionToken,
     createActivityMessagePayload(state),
   );
@@ -299,12 +272,12 @@ export async function verifyDiscordInteractionRequest(request: Request, body: st
   }
 }
 
-export async function exchangeDiscordCode(env: Bindings, code: string) {
-  const clientId = env.VITE_DISCORD_CLIENT_ID;
-  const clientSecret = env.DISCORD_CLIENT_SECRET;
+export async function exchangeDiscordCode(credentials: DiscordCredentials, code: string) {
+  const clientId = credentials.clientId;
+  const clientSecret = credentials.clientSecret;
   const missingCredentials = [
-    !clientId ? 'VITE_DISCORD_CLIENT_ID' : null,
-    !clientSecret ? 'DISCORD_CLIENT_SECRET' : null,
+    !clientId ? 'discordClientId' : null,
+    !clientSecret ? 'discordClientSecret' : null,
   ].filter((name) => name !== null);
 
   if (missingCredentials.length > 0) {
@@ -341,7 +314,7 @@ export async function exchangeDiscordCode(env: Bindings, code: string) {
       code,
     }),
   });
-  const data = await response.json<DiscordTokenResponse>();
+  const data = await response.json() as DiscordTokenResponse;
 
   if (!response.ok) {
     console.error('Discord token exchange failed:', data);
@@ -378,7 +351,7 @@ export async function validateDiscordAccess(
     return { ok: false, status: 502, error: 'Unable to verify Discord user' };
   }
 
-  const user = await userResponse.json<DiscordUser>();
+  const user = await userResponse.json() as DiscordUser;
   if (user.id !== expectedUserId) {
     return { ok: false, status: 403, error: 'Access token does not match user' };
   }
@@ -396,7 +369,7 @@ export async function validateDiscordAccess(
       return { ok: false, status: 502, error: 'Unable to verify Discord guild access' };
     }
 
-    const guilds = await guildsResponse.json<DiscordGuild[]>();
+    const guilds = await guildsResponse.json() as DiscordGuild[];
     if (!guilds.some((guild) => guild.id === expectedGuildId)) {
       return { ok: false, status: 403, error: 'User is not a member of this guild' };
     }
@@ -440,11 +413,11 @@ export function createActivityMessagePayload(state: ActivityMessageState) {
 }
 
 async function createInteractionFollowup(
-  env: DiscordApiEnv,
+  credentials: DiscordCredentials,
   interactionToken: string,
   payload: ReturnType<typeof createActivityMessagePayload>,
 ) {
-  const clientId = env.VITE_DISCORD_CLIENT_ID;
+  const clientId = credentials.clientId;
   if (!clientId) {
     console.error('Unable to create activity followup message: VITE_DISCORD_CLIENT_ID is not configured');
     return null;
@@ -467,7 +440,7 @@ async function createInteractionFollowup(
       return null;
     }
 
-    const message = await response.json<{ id: string }>();
+    const message = await response.json() as { id: string };
     console.log('activity_message:followup_response_ok', {
       status: response.status,
     });
@@ -485,12 +458,12 @@ async function createInteractionFollowup(
 }
 
 async function editInteractionFollowup(
-  env: DiscordApiEnv,
+  credentials: DiscordCredentials,
   interactionToken: string,
   messageId: string,
   payload: ReturnType<typeof createActivityMessagePayload>,
 ) {
-  const clientId = env.VITE_DISCORD_CLIENT_ID;
+  const clientId = credentials.clientId;
   if (!clientId) {
     console.error('Unable to edit activity followup message: VITE_DISCORD_CLIENT_ID is not configured');
     return false;
