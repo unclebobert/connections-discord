@@ -5,8 +5,8 @@ export type SqlValue = string | number | bigint | null | Uint8Array;
 /**
  * Thin wrapper over node:sqlite.
  *
- * node:sqlite is built into Node, so there is no native module to compile — which
- * matters on the arm64 instances this runs on.
+ * node:sqlite is built into Node, so there is no native module to compile — which keeps
+ * deployment to copying a single bundled file onto the instance.
  *
  * Each Durable Object used to own a private database, so tables were partitioned
  * implicitly by guild. One process now shares a single file, so `progress` carries an

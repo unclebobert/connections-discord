@@ -219,6 +219,24 @@ export class ProgressRoom {
     return this.users.size;
   }
 
+  /**
+   * `server.close()` waits for open connections to end, and a WebSocket never ends on
+   * its own — so without this a restart hangs until systemd's stop timeout and SIGKILL.
+   * Snapshotted because closing a socket removes it from `users`.
+   */
+  closeAll(code: number, reason: string) {
+    for (const socket of [...this.users.values()]) {
+      socket.close(code, reason);
+    }
+  }
+
+  /** Last resort for peers that never complete the closing handshake. */
+  terminateAll() {
+    for (const socket of [...this.users.values()]) {
+      socket.terminate();
+    }
+  }
+
   // --- persistence -----------------------------------------------------------
 
   saveProfile(userId: string, profile: PlayerProfile) {

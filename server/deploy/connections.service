@@ -12,6 +12,8 @@ ExecStart=/usr/bin/node --max-old-space-size=384 /opt/connections/server.cjs
 EnvironmentFile=/etc/connections/connections.env
 Restart=always
 RestartSec=2
+# The process drains WebSockets itself within ~5s; this is only a backstop.
+TimeoutStopSec=15
 
 # The service needs nothing outside its own state directory.
 StateDirectory=connections

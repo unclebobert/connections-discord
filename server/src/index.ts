@@ -39,13 +39,34 @@ server.on('upgrade', (request, socket, head) => {
   });
 });
 
+// 1001 "going away": clients treat it as a normal close and reconnect with backoff.
+const WS_CLOSE_GOING_AWAY = 1001;
+// Long enough for a closing handshake to complete, short enough that a deploy is quick.
+const SHUTDOWN_GRACE_MS = 5_000;
+
+let shuttingDown = false;
+
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
-    console.log({ msg: 'server:shutting_down', signal });
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+
+    console.log({ msg: 'server:shutting_down', signal, connections: rooms.connectionCount });
     heartbeat.stop();
+    rooms.closeAll(WS_CLOSE_GOING_AWAY, 'Server restarting');
+
     server.close(() => {
       db.close();
       process.exit(0);
     });
+
+    setTimeout(() => {
+      console.warn({ msg: 'server:shutdown_forced', connections: rooms.connectionCount });
+      rooms.terminateAll();
+      db.close();
+      process.exit(0);
+    }, SHUTDOWN_GRACE_MS);
   });
 }

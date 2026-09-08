@@ -43,4 +43,16 @@ export class RoomRegistry {
     }
     return total;
   }
+
+  closeAll(code: number, reason: string) {
+    for (const room of this.rooms.values()) {
+      room.closeAll(code, reason);
+    }
+  }
+
+  terminateAll() {
+    for (const room of this.rooms.values()) {
+      room.terminateAll();
+    }
+  }
 }

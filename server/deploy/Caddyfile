@@ -2,6 +2,10 @@
 # an HTTP challenge would be answered by Cloudflare, and the origin only ever needs a
 # certificate Cloudflare trusts. Set the zone's SSL mode to Full (strict).
 api.example.com {
+	# Caddy does not log requests unless asked to. JSON on stderr lands in the journal
+	# alongside the app's own route-labelled lines.
+	log
+
 	tls /etc/caddy/cloudflare-origin.pem /etc/caddy/cloudflare-origin.key
 
 	# reverse_proxy passes WebSocket upgrades through transparently.
