@@ -1,55 +1,89 @@
-import { evictDurableObject, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
-import { HEARTBEAT_PING, HEARTBEAT_PONG, type ProgressRoom } from '../src/session';
-import { progressRoom } from './helpers';
+import { describe, expect, it, vi } from 'vitest';
+import { WebSocket } from 'ws';
+import { SocketHeartbeat } from '../src/heartbeat.ts';
 
 /**
- * Idle sockets were being dropped and reconnected, and every reconnect costs a Worker
- * request plus a Durable Object request. The auto-response keeps the connection alive
- * without waking the object, so it has to be registered — and stay registered across
- * hibernation, which is exactly when a silent connection is most likely to be dropped.
+ * Replaces the Durable Objects auto-response heartbeat. A server can send real
+ * WebSocket protocol pings, which browsers answer without any client code — so the
+ * application-level ping/pong protocol is gone entirely.
  */
 
-describe('heartbeat auto-response', () => {
-  it('is registered so pings never reach the message handler', async () => {
-    await runInDurableObject(progressRoom('guild:heartbeat'), (_room: ProgressRoom, state) => {
-      const pair = state.getWebSocketAutoResponse();
+type FakeSocket = {
+  readyState: number;
+  ping: ReturnType<typeof vi.fn>;
+  terminate: ReturnType<typeof vi.fn>;
+  on: (event: string, listener: () => void) => void;
+  emit: (event: string) => void;
+};
 
-      expect(pair).not.toBeNull();
-      expect(pair!.request).toBe(HEARTBEAT_PING);
-      expect(pair!.response).toBe(HEARTBEAT_PONG);
-    });
+function createFakeSocket(readyState = WebSocket.OPEN): FakeSocket {
+  const listeners = new Map<string, Array<() => void>>();
+  return {
+    readyState,
+    ping: vi.fn(),
+    terminate: vi.fn(),
+    on(event, listener) {
+      listeners.set(event, [...(listeners.get(event) ?? []), listener]);
+    },
+    emit(event) {
+      for (const listener of listeners.get(event) ?? []) listener();
+    },
+  };
+}
+
+const track = (heartbeat: SocketHeartbeat, socket: FakeSocket) =>
+  heartbeat.track(socket as unknown as WebSocket);
+
+describe('SocketHeartbeat', () => {
+  it('pings a socket that answered the previous round', () => {
+    const heartbeat = new SocketHeartbeat(1000);
+    const socket = createFakeSocket();
+    track(heartbeat, socket);
+
+    heartbeat.sweep();
+    expect(socket.ping).toHaveBeenCalledTimes(1);
+    expect(socket.terminate).not.toHaveBeenCalled();
+
+    socket.emit('pong');
+    heartbeat.sweep();
+    expect(socket.ping).toHaveBeenCalledTimes(2);
+    expect(socket.terminate).not.toHaveBeenCalled();
   });
 
-  it('is re-registered after the object is evicted', async () => {
-    const stub = progressRoom('guild:heartbeat-evict');
+  it('terminates a socket that never answered', () => {
+    const heartbeat = new SocketHeartbeat(1000);
+    const socket = createFakeSocket();
+    track(heartbeat, socket);
 
-    await runInDurableObject(stub, (_room: ProgressRoom, state) => {
-      expect(state.getWebSocketAutoResponse()).not.toBeNull();
-    });
+    // First sweep pings and clears the liveness mark.
+    heartbeat.sweep();
+    // Second sweep finds no pong in between: the peer is gone even though the socket
+    // still looks open, so closing gracefully would wait for a reply that never comes.
+    heartbeat.sweep();
 
-    await evictDurableObject(stub);
-
-    await runInDurableObject(stub, (_room: ProgressRoom, state) => {
-      // The constructor re-runs on wake. If registration ever moved out of it, idle
-      // sockets would start dropping again the moment an object hibernated.
-      const pair = state.getWebSocketAutoResponse();
-
-      expect(pair).not.toBeNull();
-      expect(pair!.request).toBe(HEARTBEAT_PING);
-    });
+    expect(socket.terminate).toHaveBeenCalledTimes(1);
+    expect(heartbeat.size).toBe(0);
   });
 
-  it('answers a ping directly if one somehow reaches the handler', async () => {
-    await runInDurableObject(progressRoom('guild:heartbeat-fallback'), async (room: ProgressRoom) => {
-      const sent: string[] = [];
-      const socket = { send: (data: string) => sent.push(data) } as unknown as WebSocket;
+  it('drops a socket that closed', () => {
+    const heartbeat = new SocketHeartbeat(1000);
+    const socket = createFakeSocket();
+    track(heartbeat, socket);
 
-      await room.webSocketMessage(socket, HEARTBEAT_PING);
+    socket.emit('close');
 
-      // Falling through silently would leave the client waiting for a reply it never
-      // gets, which costs the reconnect the heartbeat exists to prevent.
-      expect(sent).toEqual([HEARTBEAT_PONG]);
-    });
+    expect(heartbeat.size).toBe(0);
+  });
+
+  it('forgets a socket that is no longer open without pinging it', () => {
+    const heartbeat = new SocketHeartbeat(1000);
+    const socket = createFakeSocket(WebSocket.CLOSED);
+    track(heartbeat, socket);
+
+    heartbeat.sweep();
+
+    expect(socket.ping).not.toHaveBeenCalled();
+    expect(socket.terminate).not.toHaveBeenCalled();
+    expect(heartbeat.size).toBe(0);
   });
 });

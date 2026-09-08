@@ -1,4 +1,4 @@
-import type { Bindings } from './env';
+import type { Database } from './db.ts';
 
 export type PlayerGuess = [number, number, number, number];
 export type PlayerProgress = PlayerGuess[];
@@ -21,20 +21,17 @@ export type ProgressMessageSummary = {
 const MAX_MISTAKES = 4;
 const MAX_CACHED_PUZZLES = 8;
 
-// Per-isolate caches. A published puzzle never changes, so memoising it removes a
-// billed KV read from every activity message update, and the written-key set stops
-// a colo from re-writing the same key on every miss.
+// A published puzzle never changes, so memoising it keeps the activity-message update
+// path off the database entirely.
 const puzzleCache = new Map<string, GameData>();
-const writtenPuzzleKeys = new Set<string>();
 
-export async function getPuzzleData(env: Pick<Bindings, 'KV'>, date: string) {
+export async function getPuzzleData(db: Database, date: string) {
   const cachedPuzzle = puzzleCache.get(date);
   if (cachedPuzzle) {
     return cachedPuzzle;
   }
 
-  const puzzleKey = getPuzzleKey(date);
-  let data = await env.KV.get<GameData>(puzzleKey, { type: 'json', cacheTtl: 86400 });
+  let data = readStoredPuzzle(db, date);
 
   if (!data) {
     const response = await fetch(`https://www.nytimes.com/svc/connections/v2/${date}.json`, {
@@ -49,18 +46,13 @@ export async function getPuzzleData(env: Pick<Bindings, 'KV'>, date: string) {
       return null;
     }
 
-    data = await response.json<GameData>();
+    data = await response.json() as GameData;
 
-    // KV caches negative lookups for the whole cacheTtl, so a colo that asked before
-    // publication keeps missing afterwards. Writing on each of those misses burns the
-    // 1,000 writes/day free allowance, which is the tightest limit in the system.
-    if (writtenPuzzleKeys.has(puzzleKey)) {
-      console.log('puzzle:kv_put_skipped', { date });
-    } else {
-      writtenPuzzleKeys.add(puzzleKey);
-      console.log('puzzle:kv_put', { date });
-      await env.KV.put(puzzleKey, JSON.stringify(data));
-    }
+    db.run(`
+      INSERT INTO puzzles (date, data, fetched_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(date) DO UPDATE SET data=excluded.data, fetched_at=excluded.fetched_at;
+    `, date, JSON.stringify(data), Date.now());
   }
 
   cachePuzzle(date, data);
@@ -126,15 +118,23 @@ export function isValidPuzzleDate(date: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(date);
 }
 
-function getPuzzleKey(date: string) {
-  return `puzzle:${date}`;
-}
-
 /**
  * Clears the per-isolate caches. Tests share a module instance with the Worker, so
  * without this the caches leak between cases and make them order-dependent.
  */
 export function resetPuzzleCaches() {
   puzzleCache.clear();
-  writtenPuzzleKeys.clear();
+}
+
+function readStoredPuzzle(db: Database, date: string): GameData | null {
+  const row = db.all<{ data: string }>('SELECT data FROM puzzles WHERE date = ?;', date)[0];
+  if (!row) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(row.data) as GameData;
+  } catch {
+    return null;
+  }
 }

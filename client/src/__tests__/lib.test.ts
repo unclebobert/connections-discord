@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  API_BASE_URL,
   createProgressGuessMessage,
   getProgressWebSocketUrl,
   parseProgressMessage,
@@ -17,7 +18,11 @@ describe('getProgressWebSocketUrl', () => {
       getProgressWebSocketUrl('guild:111', '222', '2026-08-20', '333', 'tok en/value'),
     )
 
-    expect(url.protocol).toBe('wss:')
+    // Derived from the API base URL rather than hardcoded, so this holds whether the
+    // build points at a local http server or the https production host.
+    const expectedProtocol =
+      new URL(API_BASE_URL, 'https://activity.example.com').protocol === 'https:' ? 'wss:' : 'ws:'
+    expect(url.protocol).toBe(expectedProtocol)
     // The scope separator must survive as %3A rather than splitting the path.
     expect(url.pathname.endsWith('/ws/guild%3A111/222/2026-08-20/333')).toBe(true)
     expect(url.searchParams.get('access_token')).toBe('tok en/value')
@@ -76,12 +81,6 @@ describe('parseProgressMessage', () => {
 
   it('ignores an error frame it does not understand', () => {
     expect(parseProgressMessage(JSON.stringify({ type: 'error', code: 'something-else' }))).toBeNull()
-  })
-
-  it('returns null for the heartbeat reply rather than throwing', () => {
-    // The client pings with 'ping' and the runtime auto-responds 'pong', which is not
-    // JSON. The message handler must simply ignore it.
-    expect(parseProgressMessage('pong')).toBeNull()
   })
 
   it.each([

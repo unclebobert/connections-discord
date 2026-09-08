@@ -1,15 +1,16 @@
-import { DurableObject } from 'cloudflare:workers';
+import { WebSocket } from 'ws';
 import {
   INTERACTION_TOKEN_TTL_MS,
   sendActivityLaunchMessage,
   type ActivityLaunchTokenState,
   type ActivityMessageMetadata,
   type ActivityMessagePlayer,
-} from './discord';
-import type { Bindings } from './env';
-import { getPuzzleData, summarizeProgressForMessage, type PlayerGuess, type PlayerProgress } from './puzzles';
+  type DiscordCredentials,
+} from './discord.ts';
+import type { Database } from './db.ts';
+import { getPuzzleData, summarizeProgressForMessage, type PlayerGuess, type PlayerProgress } from './puzzles.ts';
 
-type PlayerProfile = {
+export type PlayerProfile = {
   displayName: string;
   avatarUrl: string | null;
 };
@@ -18,11 +19,6 @@ type SocketAttachment = {
   scopeId: string;
   channelId: string;
   date: string;
-};
-type ActivityInteractionRequest = {
-  interactionToken: string;
-  scopeId: string;
-  channelId: string;
 };
 type ProgressGuessMessage = {
   guess: PlayerGuess;
@@ -34,273 +30,81 @@ type ActivityMessageUpdate = {
 };
 type SqlUsage = {
   calls: number;
-  rowsRead: number;
-  rowsWritten: number;
+  changes: number;
 };
 
-// How stale the persisted `last_updated_at` is allowed to get. Only this column
-// moves on a routine progress update, and it is read back solely for the
-// MESSAGE_STALE_AFTER_MS check (one hour), so persisting it on every guess buys
-// nothing. Six times smaller than that window leaves plenty of margin.
-export const ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS = 15 * 60 * 1000;
-
-// Cloudflare and Discord's activity proxy both close WebSockets that go quiet, and a
-// Connections board is quiet for minutes at a time. Browsers cannot send WebSocket
-// protocol pings from JavaScript, so the client sends this string instead and the
-// runtime answers it via setWebSocketAutoResponse — without waking the object, and
-// without the round trip costing a Worker request the way a reconnect does.
-// Must match HEARTBEAT_PING / HEARTBEAT_PONG in client/src/lib.tsx.
-export const HEARTBEAT_PING = 'ping';
-export const HEARTBEAT_PONG = 'pong';
-
-export class ProgressRoom extends DurableObject<Bindings> {
-  sql: SqlStorage;
-  env: Bindings;
-  users: Map<string, WebSocket>;
-  userProgress: Map<string, PlayerProgress>;
-  loadedProgressDates: Set<string>;
-  userProfiles: Map<string, PlayerProfile>;
-  pendingActivityMessageUpdates: Map<string, ActivityMessageUpdate>;
-  activityMessageUpdateTask: Promise<void> | null;
+/**
+ * One room per Discord scope (a guild, or a DM channel).
+ *
+ * This was a Durable Object. The hibernation machinery it needed — serialised socket
+ * attachments, rebuilding the socket map in the constructor, an auto-response for
+ * application-level pings — is all gone: the process holds this in memory and the
+ * server sends real WebSocket protocol pings instead.
+ *
+ * Every Durable Object had a private database, so `progress` was implicitly scoped to
+ * one guild. There is now a single shared database, so `scopeId` is a field on the
+ * room and every progress query filters by it.
+ */
+export class ProgressRoom {
+  readonly scopeId: string;
   sqlUsage: Map<string, SqlUsage>;
-  activityMessageMetadata: Map<string, ActivityMessageMetadata>;
-  persistedActivityMessageUpdatedAt: Map<string, number>;
 
-  constructor(ctx: DurableObjectState, env: Bindings) {
-    // Required, as we're extending the base class.
-    super(ctx, env)
-    this.env = env;
-    this.sql = ctx.storage.sql;
+  private readonly db: Database;
+  private readonly credentials: DiscordCredentials;
+  private readonly users: Map<string, WebSocket>;
+  private readonly attachments: WeakMap<WebSocket, SocketAttachment>;
+  private readonly userProgress: Map<string, PlayerProgress>;
+  private readonly loadedProgressDates: Set<string>;
+  private readonly userProfiles: Map<string, PlayerProfile>;
+  private readonly loadedProfileIds: Set<string>;
+  private readonly activityMessageMetadata: Map<string, ActivityMessageMetadata>;
+  private readonly pendingActivityMessageUpdates: Map<string, ActivityMessageUpdate>;
+  private activityMessageUpdateTask: Promise<void> | null;
+
+  constructor(scopeId: string, db: Database, credentials: DiscordCredentials) {
+    this.scopeId = scopeId;
+    this.db = db;
+    this.credentials = credentials;
     this.sqlUsage = new Map();
-    this.activityMessageMetadata = new Map();
-    this.persistedActivityMessageUpdatedAt = new Map();
-    // Since this can hibernate when websockets are idle, need to restore
-    // the users map from the stored currently connected websockets,
-    // because DOs get killed when hibernating
     this.users = new Map();
-    for (const socket of this.ctx.getWebSockets()) {
-      const attachment = this.getSocketAttachment(socket);
-      this.users.set(getSocketKey(attachment.date, attachment.userId), socket);
-    }
+    this.attachments = new WeakMap();
     this.userProgress = new Map();
     this.loadedProgressDates = new Set();
+    this.userProfiles = new Map();
+    this.loadedProfileIds = new Set();
+    this.activityMessageMetadata = new Map();
     this.pendingActivityMessageUpdates = new Map();
     this.activityMessageUpdateTask = null;
-    this.trackedExec('schema:progress', `
-      CREATE TABLE IF NOT EXISTS progress (
-        date TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        progress JSON NOT NULL,
-        PRIMARY KEY (date, user_id)
-      );
-    `)
-    this.trackedExec('schema:profiles', `
-      CREATE TABLE IF NOT EXISTS profiles (
-        user_id TEXT NOT NULL PRIMARY KEY,
-        display_name TEXT NOT NULL,
-        avatar_url TEXT
-      );
-    `)
-    this.trackedExec('schema:activity_messages', `
-      CREATE TABLE IF NOT EXISTS activity_messages (
-        date TEXT NOT NULL,
-        channel_id TEXT NOT NULL,
-        message_id TEXT,
-        interaction_token TEXT,
-        token_expires_at INTEGER NOT NULL,
-        last_updated_at INTEGER NOT NULL,
-        PRIMARY KEY (date, channel_id)
-      );
-    `)
-    this.trackedExec('schema:launch_tokens', `
-      CREATE TABLE IF NOT EXISTS launch_tokens (
-        channel_id TEXT NOT NULL PRIMARY KEY,
-        interaction_token TEXT NOT NULL,
-        token_expires_at INTEGER NOT NULL
-      );
-    `)
-
-    this.ctx.setWebSocketAutoResponse(
-      new WebSocketRequestResponsePair(HEARTBEAT_PING, HEARTBEAT_PONG),
-    );
-
-    this.userProfiles = new Map();
-    const profiles = this.trackedQuery<{
-      user_id: string,
-      display_name: string,
-      avatar_url: string | null,
-    }>('profiles:load_all', `
-      SELECT * FROM profiles;
-    `)
-    for (const { user_id: userId, display_name: displayName, avatar_url: avatarUrl } of profiles) {
-      this.userProfiles.set(userId, {
-        displayName,
-        avatarUrl,
-      });
-    }
   }
 
-  /**
-   * Runs a statement and records what it cost against `site`.
-   *
-   * Use this for writes and DDL only. `rowsRead`/`rowsWritten` grow as a cursor is
-   * consumed, so anything that returns rows must go through `trackedQuery`, which
-   * records after draining.
-   */
-  trackedExec(site: string, query: string, ...bindings: unknown[]) {
-    const cursor = this.sql.exec(query, ...bindings);
-    this.recordSqlUsage(site, cursor);
-    return cursor;
+  // --- instrumentation -------------------------------------------------------
+  // Kept from the Cloudflare era, but for timing and diagnostics rather than
+  // billing: SQLite writes are free here, so exact row counts no longer matter.
+
+  trackedExec(site: string, query: string, ...bindings: Array<string | number | null>) {
+    const result = this.db.run(query, ...bindings);
+    this.recordSqlUsage(site, Number(result.changes));
+    return result;
   }
 
-  trackedQuery<T extends Record<string, SqlStorageValue>>(site: string, query: string, ...bindings: unknown[]): T[] {
-    const cursor = this.sql.exec<T>(query, ...bindings);
-    const rows = cursor.toArray();
-    this.recordSqlUsage(site, cursor);
+  trackedQuery<T>(site: string, query: string, ...bindings: Array<string | number | null>): T[] {
+    const rows = this.db.all<T>(query, ...bindings);
+    this.recordSqlUsage(site, 0);
     return rows;
   }
 
-  recordSqlUsage(site: string, cursor: { rowsRead: number; rowsWritten: number }) {
-    const usage = this.sqlUsage.get(site) ?? { calls: 0, rowsRead: 0, rowsWritten: 0 };
+  private recordSqlUsage(site: string, changes: number) {
+    const usage = this.sqlUsage.get(site) ?? { calls: 0, changes: 0 };
     usage.calls += 1;
-    usage.rowsRead += cursor.rowsRead;
-    usage.rowsWritten += cursor.rowsWritten;
+    usage.changes += changes;
     this.sqlUsage.set(site, usage);
   }
 
-  /**
-   * Emits one aggregate line per Durable Object invocation. Called at every entry
-   * point rather than on a timer, because a pending timer would keep the object
-   * out of hibernation.
-   */
-  flushSqlUsage(event: string) {
-    if (this.sqlUsage.size === 0) {
-      return;
-    }
+  // --- connection lifecycle --------------------------------------------------
 
-    let rowsRead = 0;
-    let rowsWritten = 0;
-    const sites: Record<string, SqlUsage> = {};
-    for (const [site, usage] of this.sqlUsage) {
-      sites[site] = usage;
-      rowsRead += usage.rowsRead;
-      rowsWritten += usage.rowsWritten;
-    }
-
-    this.sqlUsage.clear();
-
-    // Durable Object invocations are not "incoming requests to your Worker", so the
-    // Worker's head_sampling_rate does not thin them out. Volume has to be cut at
-    // the source instead, and rows written is the metric under pressure, so
-    // read-only invocations are not worth an event.
-    if (rowsWritten === 0) {
-      return;
-    }
-
-    // Logged as a single object so Workers Logs indexes `rowsWritten`/`rowsRead` as
-    // numeric fields. A string argument alongside would bury them in the message,
-    // where they can only be text-matched rather than summed and grouped.
-    // Grouping by `event` separates the guess path (websocket_message) from the join
-    // path (fetch) and the Discord message update (activity_message_update).
-    console.log({ msg: 'sql_usage', event, rowsRead, rowsWritten, sites });
-  }
-
-  removeSocket(ws: WebSocket) {
-    const attachment = this.getSocketAttachment(ws);
-    const socketKey = getSocketKey(attachment.date, attachment.userId);
-    if (this.users.get(socketKey) === ws) {
-      this.users.delete(socketKey);
-    }
-  }
-
-  async fetch(request: Request) {
-    try {
-      return await this.handleFetch(request);
-    } finally {
-      this.flushSqlUsage('fetch');
-    }
-  }
-
-  async handleFetch(request: Request) {
-    const url = new URL(request.url);
-    if (url.pathname === '/activity/launch-token' && request.method === 'POST') {
-      return this.handleActivityLaunchToken(request);
-    }
-
-    if (url.pathname === '/activity/launch-token' && request.method === 'GET') {
-      return this.handleGetActivityLaunchToken(url);
-    }
-
-    const upgradeHeader = request.headers.get('Upgrade');
-    if (!upgradeHeader || upgradeHeader !== 'websocket') {
-      return new Response('ProgressRoom expected Upgrade: websocket', {
-        status: 426,
-      });
-    }
-
-    const userId = request.headers.get('x-progress-user-id');
-    const scopeId = request.headers.get('x-progress-scope-id');
-    const channelId = request.headers.get('x-progress-channel-id');
-    const date = request.headers.get('x-progress-date');
-    const encodedProfile = request.headers.get('x-progress-profile');
-    if (!userId || !scopeId || !channelId || !date || !encodedProfile) {
-      console.warn('progress_room:missing_authenticated_user', {
-        hasUserId: Boolean(userId),
-        hasScopeId: Boolean(scopeId),
-        hasChannelId: Boolean(channelId),
-        hasDate: Boolean(date),
-        hasProfile: Boolean(encodedProfile),
-      });
-      return new Response('Missing authenticated progress user', {
-        status: 401,
-      });
-    }
-
-    try {
-      return await this.join(
-        userId,
-        scopeId,
-        channelId,
-        date,
-        JSON.parse(decodeURIComponent(encodedProfile)) as PlayerProfile,
-      );
-    } catch (error) {
-      console.error('Error opening progress socket:', error);
-      return new Response('Invalid progress user metadata', {
-        status: 400,
-      });
-    }
-  }
-
-  async handleActivityLaunchToken(request: Request) {
-    const body = await request.json<ActivityInteractionRequest>().catch(() => null);
-    if (!isActivityInteractionRequest(body)) {
-      return new Response('Invalid activity launch token payload', {
-        status: 400,
-      });
-    }
-
-    this.saveLatestActivityLaunchToken(body.scopeId, body.channelId, body.interactionToken);
-
-    return new Response(null, {
-      status: 204,
-    });
-  }
-
-  handleGetActivityLaunchToken(url: URL) {
-    const channelId = url.searchParams.get('channelId');
-    if (!channelId) {
-      return new Response('Missing channelId', {
-        status: 400,
-      });
-    }
-
-    return Response.json(this.getStoredActivityLaunchToken(channelId));
-  }
-
-  join(userId: string, scopeId: string, channelId: string, date: string, profile: PlayerProfile) {
+  join(socket: WebSocket, userId: string, channelId: string, date: string, profile: PlayerProfile) {
     console.log('progress_room:join', {
-      scopeId,
+      scopeId: this.scopeId,
       channelId,
       date,
       userId,
@@ -313,45 +117,42 @@ export class ProgressRoom extends DurableObject<Bindings> {
       existingSocket.close(1000, 'New connection established');
     }
 
-    const webSocketPair = new WebSocketPair();
-    const [client, server] = Object.values(webSocketPair);
+    const attachment = { userId, scopeId: this.scopeId, channelId, date } satisfies SocketAttachment;
+    this.attachments.set(socket, attachment);
+    this.users.set(socketKey, socket);
 
-    // use this instead of websocket.accept() since it allows hibernation
-    this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ userId, scopeId, channelId, date } satisfies SocketAttachment);
-    this.users.set(socketKey, server);
+    socket.on('message', (data, isBinary) => {
+      void this.handleMessage(socket, data.toString(), isBinary);
+    });
+    socket.on('close', (code, reason) => {
+      this.handleClose(socket, code, reason.toString());
+    });
+    socket.on('error', (error) => {
+      this.handleError(socket, error);
+    });
+
     this.saveProfile(userId, profile);
     this.ensurePlayerProgress(userId, date);
 
-    // send initial progress of all users to the newly connected client
+    // Send the current progress of everyone on this date to the new client.
     const usersProgress = this.getDateProgress(date)
-      .map(([userId, progress]) => ({
-        userId,
+      .map(([progressUserId, progress]) => ({
+        userId: progressUserId,
         progress,
-        profile: this.userProfiles.get(userId) ?? null,
+        profile: this.userProfiles.get(progressUserId) ?? null,
       }));
-    server.send(JSON.stringify(usersProgress));
-    this.queueActivityMessageUpdateForPlayer(userId, scopeId, channelId, date);
-
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-    });
+    socket.send(JSON.stringify(usersProgress));
+    this.queueActivityMessageUpdateForPlayer(userId, this.scopeId, channelId, date);
   }
-  
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-    // listen for updates and push them to all connected clients
-    if (message instanceof ArrayBuffer) {
+
+  private async handleMessage(socket: WebSocket, message: string, isBinary: boolean) {
+    if (isBinary) {
       console.error('Binary messages are not supported');
       return;
     }
 
-    if (message === HEARTBEAT_PING) {
-      // The runtime should have auto-responded without waking us. Reaching here means
-      // it did not, so answer anyway: letting the client time out would cost a
-      // reconnect, which is the exact expense the heartbeat exists to avoid.
-      console.warn('progress_room:heartbeat_not_auto_answered');
-      ws.send(HEARTBEAT_PONG);
+    const attachment = this.attachments.get(socket);
+    if (!attachment) {
       return;
     }
 
@@ -362,9 +163,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
         console.error('Invalid guess format');
         return;
       }
-      const attachment = this.getSocketAttachment(ws);
-      // No log here: `progress:guess_saved` below carries the same fields, and this
-      // handler is the highest-frequency event in the system.
+
       const { wasSaved } = this.saveGuess(attachment, guess);
       if (wasSaved) {
         this.queueActivityMessageUpdateForPlayer(
@@ -376,48 +175,62 @@ export class ProgressRoom extends DurableObject<Bindings> {
       }
     } catch (error) {
       console.error('Error parsing guess:', error);
-    } finally {
-      this.flushSqlUsage('websocket_message');
     }
   }
 
-  async webSocketClose(ws: WebSocket, code?: number, reason?: string, wasClean?: boolean) {
-    const attachment = this.getSocketAttachment(ws);
+  private handleClose(socket: WebSocket, code?: number, reason?: string) {
+    const attachment = this.attachments.get(socket);
     console.log('progress_room:socket_close', {
-      scopeId: attachment.scopeId,
-      channelId: attachment.channelId,
-      date: attachment.date,
-      userId: attachment.userId,
+      scopeId: this.scopeId,
+      channelId: attachment?.channelId ?? null,
+      date: attachment?.date ?? null,
+      userId: attachment?.userId ?? null,
       code: code ?? null,
-      reason: reason ?? null,
-      wasClean: wasClean ?? null,
+      reason: reason || null,
     });
-    this.removeSocket(ws);
-    this.flushSqlUsage('websocket_close');
+    this.removeSocket(socket);
   }
 
-  async webSocketError(ws: WebSocket, error?: unknown) {
-    const attachment = this.getSocketAttachment(ws);
+  private handleError(socket: WebSocket, error: unknown) {
+    const attachment = this.attachments.get(socket);
     console.warn('progress_room:socket_error', {
-      scopeId: attachment.scopeId,
-      channelId: attachment.channelId,
-      date: attachment.date,
-      userId: attachment.userId,
+      scopeId: this.scopeId,
+      channelId: attachment?.channelId ?? null,
+      userId: attachment?.userId ?? null,
       error: error instanceof Error ? error.message : String(error ?? ''),
     });
-    this.removeSocket(ws);
-    this.flushSqlUsage('websocket_error');
+    this.removeSocket(socket);
   }
 
+  removeSocket(socket: WebSocket) {
+    const attachment = this.attachments.get(socket);
+    if (!attachment) {
+      return;
+    }
+
+    const socketKey = getSocketKey(attachment.date, attachment.userId);
+    if (this.users.get(socketKey) === socket) {
+      this.users.delete(socketKey);
+    }
+    this.attachments.delete(socket);
+  }
+
+  get connectionCount() {
+    return this.users.size;
+  }
+
+  // --- persistence -----------------------------------------------------------
+
   saveProfile(userId: string, profile: PlayerProfile) {
+    this.loadProfiles([userId]);
     const storedProfile = this.userProfiles.get(userId);
     if (
       storedProfile &&
       storedProfile.displayName === profile.displayName &&
       storedProfile.avatarUrl === profile.avatarUrl
     ) {
-      // Display name and avatar are stable across sessions, so writing on every
-      // connect burns a row per reconnect to store what is already there.
+      // Display name and avatar are stable across sessions; rewriting them on every
+      // connect is pure churn.
       return;
     }
 
@@ -431,6 +244,34 @@ export class ProgressRoom extends DurableObject<Bindings> {
     `, userId, profile.displayName, profile.avatarUrl);
   }
 
+  /** Profiles are global, so only the ids actually in play are ever loaded. */
+  private loadProfiles(userIds: string[]) {
+    const missing = userIds.filter((userId) => !this.loadedProfileIds.has(userId));
+    if (missing.length === 0) {
+      return;
+    }
+
+    const placeholders = missing.map(() => '?').join(', ');
+    const rows = this.trackedQuery<{
+      user_id: string,
+      display_name: string,
+      avatar_url: string | null,
+    }>('profiles:load', `
+      SELECT user_id, display_name, avatar_url
+      FROM profiles
+      WHERE user_id IN (${placeholders});
+    `, ...missing);
+
+    for (const { user_id: userId, display_name: displayName, avatar_url: avatarUrl } of rows) {
+      this.userProfiles.set(userId, { displayName, avatarUrl });
+    }
+
+    // Remember the misses too, so an unknown user is not re-queried on every guess.
+    for (const userId of missing) {
+      this.loadedProfileIds.add(userId);
+    }
+  }
+
   loadDateProgress(date: string) {
     if (this.loadedProgressDates.has(date)) {
       return;
@@ -442,12 +283,14 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }>('progress:load_date', `
       SELECT user_id, progress
       FROM progress
-      WHERE date = ?;
-    `, date);
+      WHERE scope_id = ? AND date = ?;
+    `, this.scopeId, date);
+
     for (const { user_id: userId, progress } of rows) {
-      this.userProgress.set(getProgressKey(date, userId), JSON.parse(progress));
+      this.userProgress.set(getProgressKey(date, userId), JSON.parse(progress) as PlayerProgress);
     }
     this.loadedProgressDates.add(date);
+    this.loadProfiles(rows.map((row) => row.user_id));
   }
 
   ensurePlayerProgress(userId: string, date: string) {
@@ -459,25 +302,10 @@ export class ProgressRoom extends DurableObject<Bindings> {
 
     this.userProgress.set(progressKey, []);
     this.trackedExec('progress:ensure', `
-      INSERT INTO progress (date, user_id, progress)
-      VALUES (?, ?, ?)
-      ON CONFLICT(date, user_id) DO NOTHING;
-    `, date, userId, JSON.stringify([]));
-  }
-
-  getSocketAttachment(ws: WebSocket): SocketAttachment {
-    const attachment = ws.deserializeAttachment();
-
-    if (typeof attachment === 'string') {
-      return {
-        userId: attachment,
-        scopeId: '',
-        channelId: '',
-        date: '',
-      };
-    }
-
-    return attachment as SocketAttachment;
+      INSERT INTO progress (scope_id, date, user_id, progress)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(scope_id, date, user_id) DO NOTHING;
+    `, this.scopeId, date, userId, JSON.stringify([]));
   }
 
   getDateProgress(date: string): Array<[string, PlayerProgress]> {
@@ -488,15 +316,14 @@ export class ProgressRoom extends DurableObject<Bindings> {
       .map(([progressKey, progress]) => [progressKey.slice(prefix.length), progress]);
   }
 
-  saveGuess({ userId, scopeId, channelId, date }: SocketAttachment, newGuess: PlayerGuess) {
-    // Update in-memory progress and persist to SQL storage
+  saveGuess({ userId, channelId, date }: SocketAttachment, newGuess: PlayerGuess) {
     this.loadDateProgress(date);
     const progressKey = getProgressKey(date, userId);
     const currentProgress = this.userProgress.get(progressKey) ?? [];
     const isDuplicateGuess = currentProgress.some((guess) => areSameGuess(guess, newGuess));
     if (isDuplicateGuess) {
       console.log('progress:guess_duplicate', {
-        scopeId,
+        scopeId: this.scopeId,
         channelId,
         date,
         userId,
@@ -508,43 +335,51 @@ export class ProgressRoom extends DurableObject<Bindings> {
     const progress = [...currentProgress, newGuess];
     this.userProgress.set(progressKey, progress);
     this.trackedExec('progress:save_guess', `
-      INSERT INTO progress (date, user_id, progress)
-      VALUES (?, ?, ?)
-      ON CONFLICT(date, user_id) DO UPDATE SET progress=excluded.progress;
-    `, date, userId, JSON.stringify(progress));
+      INSERT INTO progress (scope_id, date, user_id, progress)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(scope_id, date, user_id) DO UPDATE SET progress=excluded.progress;
+    `, this.scopeId, date, userId, JSON.stringify(progress));
 
     console.log('progress:guess_saved', {
-      scopeId,
+      scopeId: this.scopeId,
       channelId,
       date,
       userId,
       guessCount: progress.length,
     });
 
-    // Send progress update to all connected clients via websocket
+    this.broadcastProgress(userId, date, progress);
+
+    return { progress, wasSaved: true };
+  }
+
+  private broadcastProgress(userId: string, date: string, progress: PlayerProgress) {
+    const payload = JSON.stringify({
+      userId,
+      progress,
+      profile: this.userProfiles.get(userId) ?? null,
+    });
+
     for (const [socketKey, socket] of this.users.entries()) {
-      const attachment = this.getSocketAttachment(socket);
-      if (attachment.date !== date) continue;
-      if (attachment.userId === userId) continue; // Don't send progress update to the user who made the update
+      const attachment = this.attachments.get(socket);
+      if (!attachment || attachment.date !== date) continue;
+      // The sender already applied this optimistically.
+      if (attachment.userId === userId) continue;
       if (socket.readyState !== WebSocket.OPEN) {
         this.users.delete(socketKey);
         continue;
       }
 
       try {
-        socket.send(JSON.stringify({
-          userId,
-          progress,
-          profile: this.userProfiles.get(userId) ?? null,
-        }));
+        socket.send(payload);
       } catch (error) {
         this.users.delete(socketKey);
         console.error('Error sending progress update:', error);
       }
     }
-
-    return { progress, wasSaved: true };
   }
+
+  // --- Discord launch message ------------------------------------------------
 
   queueActivityMessageUpdateForPlayer(userId: string, scopeId: string, channelId: string, date: string) {
     if (!scopeId || !channelId || !date) {
@@ -567,7 +402,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
 
     const task = this.flushActivityMessageUpdates();
     this.activityMessageUpdateTask = task;
-    this.ctx.waitUntil(task.finally(() => {
+    void task.finally(() => {
       if (this.activityMessageUpdateTask !== task) {
         return;
       }
@@ -576,31 +411,27 @@ export class ProgressRoom extends DurableObject<Bindings> {
       if (this.pendingActivityMessageUpdates.size > 0) {
         this.startActivityMessageUpdateTask();
       }
-    }));
+    });
   }
 
   async flushActivityMessageUpdates() {
-    try {
-      while (this.pendingActivityMessageUpdates.size > 0) {
-        const nextEntry = this.pendingActivityMessageUpdates.entries().next().value;
-        if (!nextEntry) {
-          return;
-        }
-
-        const [updateKey, update] = nextEntry;
-        this.pendingActivityMessageUpdates.delete(updateKey);
-
-        try {
-          await this.updateActivityMessage(update.scopeId, update.channelId, update.date);
-        } catch (error) {
-          console.warn('activity_message:update_failed', {
-            ...update,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+    while (this.pendingActivityMessageUpdates.size > 0) {
+      const nextEntry = this.pendingActivityMessageUpdates.entries().next().value;
+      if (!nextEntry) {
+        return;
       }
-    } finally {
-      this.flushSqlUsage('activity_message_update');
+
+      const [updateKey, update] = nextEntry;
+      this.pendingActivityMessageUpdates.delete(updateKey);
+
+      try {
+        await this.updateActivityMessage(update.scopeId, update.channelId, update.date);
+      } catch (error) {
+        console.warn('activity_message:update_failed', {
+          ...update,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 
@@ -610,13 +441,9 @@ export class ProgressRoom extends DurableObject<Bindings> {
     date: string,
     interactionToken?: string,
   ) {
-    const puzzle = await getPuzzleData(this.env, date);
+    const puzzle = await getPuzzleData(this.db, date);
     if (!puzzle) {
-      console.warn('activity_message:skip_missing_puzzle', {
-        scopeId,
-        channelId,
-        date,
-      });
+      console.warn('activity_message:skip_missing_puzzle', { scopeId, channelId, date });
       return;
     }
 
@@ -626,7 +453,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
 
     let metadata = this.getActivityMessageMetadata(scopeId, channelId, date);
-    let result = await sendActivityLaunchMessage(this.env, {
+    let result = await sendActivityLaunchMessage(this.credentials, {
       scopeId,
       channelId,
       date,
@@ -649,13 +476,9 @@ export class ProgressRoom extends DurableObject<Bindings> {
         return;
       }
 
-      console.log('activity_message:reuse_current_launch_token', {
-        scopeId,
-        channelId,
-        date,
-      });
+      console.log('activity_message:reuse_current_launch_token', { scopeId, channelId, date });
       metadata = result.metadata;
-      result = await sendActivityLaunchMessage(this.env, {
+      result = await sendActivityLaunchMessage(this.credentials, {
         scopeId,
         channelId,
         date,
@@ -671,7 +494,10 @@ export class ProgressRoom extends DurableObject<Bindings> {
     }
   }
 
-  getActivityMessagePlayers(date: string, puzzle: NonNullable<Awaited<ReturnType<typeof getPuzzleData>>>): ActivityMessagePlayer[] {
+  getActivityMessagePlayers(
+    date: string,
+    puzzle: NonNullable<Awaited<ReturnType<typeof getPuzzleData>>>,
+  ): ActivityMessagePlayer[] {
     return this.getDateProgress(date)
       .map(([userId, progress]) => {
         const progressSummary = summarizeProgressForMessage(progress, puzzle);
@@ -717,17 +543,11 @@ export class ProgressRoom extends DurableObject<Bindings> {
 
     return {
       interactionToken: token.interaction_token,
-      tokenExpiresAt: token.token_expires_at,
+      tokenExpiresAt: Number(token.token_expires_at),
     };
   }
 
-  getStoredActivityLaunchToken(channelId: string): ActivityLaunchTokenState | null {
-    return this.getLatestActivityLaunchToken(channelId);
-  }
-
   getActivityMessageMetadata(scopeId: string, channelId: string, date: string): ActivityMessageMetadata | null {
-    // The in-memory copy is authoritative while the object is alive; the stored row
-    // deliberately lags behind it by up to ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS.
     const cacheKey = getActivityMessageUpdateKey(channelId, date);
     const cachedMetadata = this.activityMessageMetadata.get(cacheKey);
     if (cachedMetadata) {
@@ -755,35 +575,19 @@ export class ProgressRoom extends DurableObject<Bindings> {
       date,
       messageId: metadata.message_id,
       interactionToken: metadata.interaction_token,
-      tokenExpiresAt: metadata.token_expires_at,
-      lastUpdatedAt: metadata.last_updated_at,
+      tokenExpiresAt: Number(metadata.token_expires_at),
+      lastUpdatedAt: Number(metadata.last_updated_at),
     };
     this.activityMessageMetadata.set(cacheKey, restoredMetadata);
-    this.persistedActivityMessageUpdatedAt.set(cacheKey, restoredMetadata.lastUpdatedAt);
 
     return restoredMetadata;
   }
 
   saveActivityMessageMetadata(metadata: ActivityMessageMetadata) {
-    const cacheKey = getActivityMessageUpdateKey(metadata.channelId, metadata.date);
-    const previousMetadata = this.activityMessageMetadata.get(cacheKey);
-    const persistedUpdatedAt = this.persistedActivityMessageUpdatedAt.get(cacheKey);
-    this.activityMessageMetadata.set(cacheKey, metadata);
-
-    // message_id / interaction_token / token_expires_at identify the message and
-    // must be durable the moment they change. last_updated_at only feeds a
-    // one-hour staleness check, so it can lag.
-    const hasSameMessageIdentity = previousMetadata !== undefined &&
-      previousMetadata.messageId === metadata.messageId &&
-      previousMetadata.interactionToken === metadata.interactionToken &&
-      previousMetadata.tokenExpiresAt === metadata.tokenExpiresAt;
-    const isPersistedUpdatedAtRecent = persistedUpdatedAt !== undefined &&
-      metadata.lastUpdatedAt - persistedUpdatedAt < ACTIVITY_MESSAGE_PERSIST_INTERVAL_MS;
-
-    if (hasSameMessageIdentity && isPersistedUpdatedAtRecent) {
-      return;
-    }
-
+    // Written every time. The lazy-persistence scheme this replaces existed only to
+    // save billed row writes on Durable Objects, and let the stored timestamp fall
+    // behind reality across a restart.
+    this.activityMessageMetadata.set(getActivityMessageUpdateKey(metadata.channelId, metadata.date), metadata);
     this.trackedExec('activity_messages:save', `
       INSERT INTO activity_messages (
         date,
@@ -800,16 +604,7 @@ export class ProgressRoom extends DurableObject<Bindings> {
         token_expires_at=excluded.token_expires_at,
         last_updated_at=excluded.last_updated_at;
     `, metadata.date, metadata.channelId, metadata.messageId, metadata.interactionToken, metadata.tokenExpiresAt, metadata.lastUpdatedAt);
-    this.persistedActivityMessageUpdatedAt.set(cacheKey, metadata.lastUpdatedAt);
   }
-}
-
-function isActivityInteractionRequest(value: unknown): value is ActivityInteractionRequest {
-  return typeof value === 'object' &&
-    value !== null &&
-    typeof (value as ActivityInteractionRequest).interactionToken === 'string' &&
-    typeof (value as ActivityInteractionRequest).scopeId === 'string' &&
-    typeof (value as ActivityInteractionRequest).channelId === 'string';
 }
 
 export function isPlayerGuess(value: unknown): value is PlayerGuess {

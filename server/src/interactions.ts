@@ -9,15 +9,14 @@ import {
   INTERACTION_TYPE_APPLICATION_COMMAND,
   INTERACTION_TYPE_MESSAGE_COMPONENT,
   INTERACTION_TYPE_PING,
-  storeActivityLaunchTokenForInteraction,
   verifyDiscordInteractionRequest,
   type DiscordInteraction,
-} from './discord';
-import type { Bindings } from './env';
+} from './discord.ts';
+import type { AppEnv } from './env.ts';
 
-export async function handleDiscordInteraction(c: Context<{ Bindings: Bindings }>) {
+export async function handleDiscordInteraction(c: Context<{ Bindings: AppEnv }>) {
   const body = await c.req.text();
-  const isValidRequest = await verifyDiscordInteractionRequest(c.req.raw, body, c.env.DISCORD_PUBLIC_KEY);
+  const isValidRequest = await verifyDiscordInteractionRequest(c.req.raw, body, c.env.config.publicKey);
 
   if (!isValidRequest) {
     console.warn('interaction:invalid_signature');
@@ -56,18 +55,17 @@ export async function handleDiscordInteraction(c: Context<{ Bindings: Bindings }
   return c.json(createEphemeralInteractionMessage('Unsupported interaction.'));
 }
 
-function handleActivityLaunchInteraction(c: Context<{ Bindings: Bindings }>, interaction: DiscordInteraction) {
+function handleActivityLaunchInteraction(c: Context<{ Bindings: AppEnv }>, interaction: DiscordInteraction) {
   const launchContext = getInteractionLaunchContext(interaction);
   if (!launchContext) {
     console.warn('interaction:launch_missing_context');
     return c.json(createEphemeralInteractionMessage('Connections can only be launched from a Discord channel.'));
   }
 
-  c.executionCtx.waitUntil(storeActivityLaunchTokenForInteraction(
-    c.env,
-    interaction.token,
-    launchContext,
-  ));
+  // No waitUntil on Node, and no Durable Object hop: the room is in this process.
+  c.env.rooms
+    .get(launchContext.scopeId)
+    .saveLatestActivityLaunchToken(launchContext.scopeId, launchContext.channelId, interaction.token);
   console.log('interaction:launch_activity', {
     guildId: launchContext.guildId,
     channelId: launchContext.channelId,
@@ -75,18 +73,17 @@ function handleActivityLaunchInteraction(c: Context<{ Bindings: Bindings }>, int
   return c.json({ type: INTERACTION_RESPONSE_LAUNCH_ACTIVITY });
 }
 
-function handleActivityEntryPointInteraction(c: Context<{ Bindings: Bindings }>, interaction: DiscordInteraction) {
+function handleActivityEntryPointInteraction(c: Context<{ Bindings: AppEnv }>, interaction: DiscordInteraction) {
   const launchContext = getInteractionLaunchContext(interaction);
   if (!launchContext) {
     console.warn('interaction:entrypoint_missing_context');
     return c.json(createEphemeralInteractionMessage('Connections can only be launched from a Discord channel.'));
   }
 
-  c.executionCtx.waitUntil(storeActivityLaunchTokenForInteraction(
-    c.env,
-    interaction.token,
-    launchContext,
-  ));
+  // No waitUntil on Node, and no Durable Object hop: the room is in this process.
+  c.env.rooms
+    .get(launchContext.scopeId)
+    .saveLatestActivityLaunchToken(launchContext.scopeId, launchContext.channelId, interaction.token);
   console.log('interaction:entrypoint_launch_activity', {
     guildId: launchContext.guildId,
     channelId: launchContext.channelId,

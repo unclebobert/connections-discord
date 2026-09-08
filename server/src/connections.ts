@@ -1,118 +1,35 @@
-import {
-  exchangeDiscordCode,
-  validateDiscordAccess,
-} from './discord';
-import type { App } from './env';
-import { getPuzzleData, isValidPuzzleDate } from './puzzles';
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
+import { WebSocketServer } from 'ws';
+import { exchangeDiscordCode, validateDiscordAccess } from './discord.ts';
+import type { App, AppEnv } from './env.ts';
+import type { SocketHeartbeat } from './heartbeat.ts';
+import { getPuzzleData, isValidPuzzleDate } from './puzzles.ts';
 
 // Application close codes. Must match the client's handling in App.tsx.
 export const WS_CLOSE_UNAUTHENTICATED = 4401;
 export const WS_CLOSE_FORBIDDEN = 4403;
 
+// A browser cannot read the status of a failed WebSocket handshake, so an auth
+// rejection has to be delivered over an accepted socket instead. Both an error frame
+// and a close code are sent: the close code has to survive Discord's activity proxy,
+// and the frame has to arrive before the close is processed.
+const AUTH_ERROR_FRAME = JSON.stringify({ type: 'error', code: 'auth' });
+
 export function registerConnectionsRoutes(app: App) {
-  app.get('/ws/:scopeId/:channelId/:date/:userId', async (c) => {
-    const upgradeHeader = c.req.header('Upgrade');
-    if (!upgradeHeader || upgradeHeader !== 'websocket') {
-      return new Response('Worker expected Upgrade: websocket', {
-        status: 426,
-      });
-    }
-
-    const scopeId = c.req.param('scopeId');
-    const channelId = c.req.param('channelId');
-    const date = c.req.param('date');
-    const userId = c.req.param('userId');
-    console.log('progress_ws:request', {
-      scopeId,
-      channelId,
-      date,
-      userId,
-    });
-
-    if (!scopeId || !channelId || !date || !userId) {
-      console.warn('progress_ws:missing_params');
-      return new Response('Missing scopeId, channelId, date, or userId', {
-        status: 400,
-      });
-    }
-
-    if (!isValidPuzzleDate(date)) {
-      console.warn('progress_ws:invalid_date_format', { scopeId, channelId, date, userId });
-      return new Response('Invalid date format', {
-        status: 400,
-      });
-    }
-
-    if (isPuzzleDateTooFarFromToday(date)) {
-      console.warn('progress_ws:invalid_date_range', { scopeId, channelId, date, userId });
-      return new Response('Invalid date', {
-        status: 400,
-      });
-    }
-
-    if (!isActivityScopeId(scopeId) || !isDiscordSnowflake(channelId) || !isDiscordSnowflake(userId)) {
-      console.warn('progress_ws:invalid_scope_or_snowflake', { scopeId, channelId, date, userId });
-      return c.json({ error: 'Invalid scope ID, channel ID, or user ID' }, 400);
-    }
-
-    const accessToken = c.req.query('access_token');
-    if (!accessToken) {
-      console.warn('progress_ws:missing_access_token', { scopeId, channelId, date, userId });
-      return c.json({ error: 'Missing access token' }, 401);
-    }
-
-    const expectedGuildId = getGuildIdFromActivityScope(scopeId);
-    const authResult = await validateDiscordAccess(accessToken, userId, expectedGuildId);
-    if (!authResult.ok) {
-      console.warn('progress_ws:auth_failed', {
-        scopeId,
-        channelId,
-        date,
-        userId,
-        status: authResult.status,
-        error: authResult.error,
-      });
-      // 502 means Discord itself was unreachable, which is transient — let the client
-      // retry it as a normal failed handshake. 401/403 will never succeed with this
-      // token, and a browser cannot read the status of a failed WebSocket handshake,
-      // so the rejection has to be delivered over an accepted socket instead.
-      if (authResult.status === 502) {
-        return c.json({ error: authResult.error }, authResult.status);
-      }
-
-      return createAuthFailureSocket(authResult.status);
-    }
-
-    console.log('progress_ws:auth_ok', {
-      scopeId,
-      channelId,
-      date,
-      userId,
-    });
-
-    const room = c.env.PROGRESS_ROOMS.getByName(scopeId);
-    const headers = new Headers(c.req.raw.headers);
-    headers.set('x-progress-user-id', userId);
-    headers.set('x-progress-scope-id', scopeId);
-    headers.set('x-progress-channel-id', channelId);
-    headers.set('x-progress-date', date);
-    headers.set('x-progress-profile', encodeURIComponent(JSON.stringify(authResult.profile)));
-
-    return room.fetch(new Request(c.req.raw, { headers }));
-  });
-
   app.get('/connections/:date', async (c) => {
     const date = c.req.param('date');
     if (!isValidPuzzleDate(date)) {
       return c.json({ error: 'Invalid puzzle date' }, 400);
     }
 
-    const data = await getPuzzleData(c.env, date);
+    const data = await getPuzzleData(c.env.db, date);
     if (!data) {
       return c.json({ error: 'Unable to load puzzle' }, 502);
     }
 
     return c.json(data, 200, {
+      // Cloudflare's edge caches on this, so most reads never reach the origin.
       'Cache-Control': 'public, max-age=86400',
     });
   });
@@ -123,7 +40,7 @@ export function registerConnectionsRoutes(app: App) {
       return c.json({ error: 'Invalid code' }, 400);
     }
 
-    const tokenResult = await exchangeDiscordCode(c.env, code);
+    const tokenResult = await exchangeDiscordCode(c.env.config, code);
     if (!tokenResult.ok) {
       return c.json({ error: tokenResult.error }, tokenResult.status);
     }
@@ -133,24 +50,106 @@ export function registerConnectionsRoutes(app: App) {
 }
 
 /**
- * Accepts the WebSocket purely to report why it cannot be used, then closes it.
+ * Handles the WebSocket upgrade.
  *
- * Both signals are sent because neither is fully reliable on its own: a custom close
- * code has to survive Discord's activity proxy, and a message frame has to arrive
- * before the close is processed.
+ * On Workers this was an HTTP route that authenticated and then forwarded the request
+ * to a Durable Object, smuggling the authenticated identity through `x-progress-*`
+ * headers because that was the only way across the boundary. The room is in this
+ * process now, so `join` is called directly with typed arguments.
  */
-function createAuthFailureSocket(status: 401 | 403) {
-  const pair = new WebSocketPair();
-  const server = pair[1];
+export function createUpgradeHandler(env: AppEnv, heartbeat: SocketHeartbeat) {
+  const wss = new WebSocketServer({ noServer: true });
 
-  server.accept();
-  server.send(JSON.stringify({ type: 'error', code: 'auth' }));
-  server.close(status === 401 ? WS_CLOSE_UNAUTHENTICATED : WS_CLOSE_FORBIDDEN, 'Authentication failed');
+  return async function handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer) {
+    const url = new URL(request.url ?? '/', 'http://localhost');
+    const segments = url.pathname.split('/').filter(Boolean);
 
-  return new Response(null, {
-    status: 101,
-    webSocket: pair[0],
+    if (segments[0] !== 'ws' || segments.length !== 5) {
+      rejectUpgrade(socket, 404, 'Not Found');
+      return;
+    }
+
+    const [, rawScopeId, rawChannelId, rawDate, rawUserId] = segments;
+    const scopeId = decodeURIComponent(rawScopeId);
+    const channelId = decodeURIComponent(rawChannelId);
+    const date = decodeURIComponent(rawDate);
+    const userId = decodeURIComponent(rawUserId);
+
+    console.log('progress_ws:request', { scopeId, channelId, date, userId });
+
+    if (!isValidPuzzleDate(date) || isPuzzleDateTooFarFromToday(date)) {
+      console.warn('progress_ws:invalid_date', { scopeId, channelId, date, userId });
+      rejectUpgrade(socket, 400, 'Bad Request');
+      return;
+    }
+
+    if (!isActivityScopeId(scopeId) || !isDiscordSnowflake(channelId) || !isDiscordSnowflake(userId)) {
+      console.warn('progress_ws:invalid_scope_or_snowflake', { scopeId, channelId, date, userId });
+      rejectUpgrade(socket, 400, 'Bad Request');
+      return;
+    }
+
+    const accessToken = url.searchParams.get('access_token');
+    if (!accessToken) {
+      console.warn('progress_ws:missing_access_token', { scopeId, channelId, date, userId });
+      closeWithAuthFailure(wss, request, socket, head, WS_CLOSE_UNAUTHENTICATED);
+      return;
+    }
+
+    const authResult = await validateDiscordAccess(accessToken, userId, getGuildIdFromActivityScope(scopeId));
+    if (!authResult.ok) {
+      console.warn('progress_ws:auth_failed', {
+        scopeId,
+        channelId,
+        date,
+        userId,
+        status: authResult.status,
+        error: authResult.error,
+      });
+
+      // 502 means Discord itself was unreachable, which is transient — fail the
+      // handshake so the client retries with backoff. 401/403 never will succeed with
+      // this token, so the client is told to discard it and re-authorize.
+      if (authResult.status === 502) {
+        rejectUpgrade(socket, 502, 'Bad Gateway');
+        return;
+      }
+
+      closeWithAuthFailure(
+        wss,
+        request,
+        socket,
+        head,
+        authResult.status === 401 ? WS_CLOSE_UNAUTHENTICATED : WS_CLOSE_FORBIDDEN,
+      );
+      return;
+    }
+
+    console.log('progress_ws:auth_ok', { scopeId, channelId, date, userId });
+
+    wss.handleUpgrade(request, socket, head, (client) => {
+      heartbeat.track(client);
+      env.rooms.get(scopeId).join(client, userId, channelId, date, authResult.profile);
+    });
+  };
+}
+
+function closeWithAuthFailure(
+  wss: WebSocketServer,
+  request: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  closeCode: number,
+) {
+  wss.handleUpgrade(request, socket, head, (client) => {
+    client.send(AUTH_ERROR_FRAME);
+    client.close(closeCode, 'Authentication failed');
   });
+}
+
+function rejectUpgrade(socket: Duplex, status: number, statusText: string) {
+  socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
 }
 
 export function isPuzzleDateTooFarFromToday(date: string) {

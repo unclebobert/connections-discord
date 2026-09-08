@@ -1,0 +1,9 @@
+# TLS uses a Cloudflare Origin CA certificate rather than ACME: the zone is proxied, so
+# an HTTP challenge would be answered by Cloudflare, and the origin only ever needs a
+# certificate Cloudflare trusts. Set the zone's SSL mode to Full (strict).
+api.example.com {
+	tls /etc/caddy/cloudflare-origin.pem /etc/caddy/cloudflare-origin.key
+
+	# reverse_proxy passes WebSocket upgrades through transparently.
+	reverse_proxy 127.0.0.1:8787
+}

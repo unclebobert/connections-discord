@@ -1,0 +1,25 @@
+[Unit]
+Description=Connections Discord activity server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=connections
+Group=connections
+WorkingDirectory=/opt/connections
+ExecStart=/usr/bin/node --max-old-space-size=384 /opt/connections/server.cjs
+EnvironmentFile=/etc/connections/connections.env
+Restart=always
+RestartSec=2
+
+# The service needs nothing outside its own state directory.
+StateDirectory=connections
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/connections
+
+[Install]
+WantedBy=multi-user.target

@@ -24,8 +24,6 @@ import { loadCachedPuzzle, saveCachedPuzzle } from './storage'
 import {
   API_BASE_URL,
   createProgressGuessMessage,
-  HEARTBEAT_PING,
-  HEARTBEAT_PONG,
   getProgressWebSocketUrl,
   parseProgressMessage,
   type GameCategory,
@@ -57,10 +55,6 @@ const TITLE_ENTER_Y = 10
 const TOTAL_CATEGORIES = 4
 const PROGRESS_RESTORE_TIMEOUT_MS = 8000
 const PROGRESS_SAVE_WARNING_TOAST_MS = 3000
-// Comfortably inside the idle timeouts applied by Cloudflare and by Discord's
-// activity proxy, neither of which is documented precisely.
-const PROGRESS_HEARTBEAT_INTERVAL_MS = 45000
-const PROGRESS_HEARTBEAT_TIMEOUT_MS = 10000
 const PROGRESS_RECONNECT_BASE_DELAY_MS = 1000
 const PROGRESS_RECONNECT_MAX_DELAY_MS = 60000
 const PROGRESS_STABLE_CONNECTION_MS = 30000
@@ -379,8 +373,6 @@ function App() {
     let reconnectAttempt = 0
     let reconnectTimer: number | null = null
     let stableConnectionTimer: number | null = null
-    let heartbeatTimer: number | null = null
-    let heartbeatTimeoutTimer: number | null = null
     let isReconnectDeferred = false
     let isCancelled = false
     const restoreTimeout = window.setTimeout(() => {
@@ -407,47 +399,6 @@ function App() {
       hasRetriedAuth.current = true
       resetDiscordSession()
       setSessionEpoch((currentEpoch) => currentEpoch + 1)
-    }
-
-    function stopHeartbeat() {
-      if (heartbeatTimer !== null) {
-        window.clearInterval(heartbeatTimer)
-        heartbeatTimer = null
-      }
-
-      if (heartbeatTimeoutTimer !== null) {
-        window.clearTimeout(heartbeatTimeoutTimer)
-        heartbeatTimeoutTimer = null
-      }
-    }
-
-    function startHeartbeat(socket: WebSocket) {
-      stopHeartbeat()
-
-      heartbeatTimer = window.setInterval(() => {
-        if (socket.readyState !== WebSocket.OPEN) {
-          stopHeartbeat()
-          return
-        }
-
-        // A silent connection is indistinguishable from a healthy one, so treat a
-        // missing reply as dead and close it. The close handler reconnects, which is
-        // far cheaper than discovering the loss on the player's next guess.
-        if (heartbeatTimeoutTimer === null) {
-          heartbeatTimeoutTimer = window.setTimeout(() => {
-            heartbeatTimeoutTimer = null
-            console.warn('Progress socket heartbeat timed out')
-            socket.close(4000, 'Heartbeat timeout')
-          }, PROGRESS_HEARTBEAT_TIMEOUT_MS)
-        }
-
-        try {
-          socket.send(HEARTBEAT_PING)
-        } catch (error) {
-          console.warn('Unable to send heartbeat:', error)
-          socket.close(4000, 'Heartbeat send failed')
-        }
-      }, PROGRESS_HEARTBEAT_INTERVAL_MS)
     }
 
     function scheduleReconnect() {
@@ -526,7 +477,6 @@ function App() {
             reconnectAttempt = 0
           }
         }, PROGRESS_STABLE_CONNECTION_MS)
-        startHeartbeat(nextSocket)
       })
       nextSocket.addEventListener('close', (event) => {
         const isCurrentSocket = progressSocket.current === nextSocket
@@ -538,8 +488,6 @@ function App() {
           window.clearTimeout(stableConnectionTimer)
           stableConnectionTimer = null
         }
-
-        stopHeartbeat()
 
         console.warn('Progress socket closed:', {
           code: event.code,
@@ -567,17 +515,7 @@ function App() {
         markRestoreUnavailable()
       })
       nextSocket.addEventListener('message', (event) => {
-        const rawMessage = String(event.data)
-
-        if (rawMessage === HEARTBEAT_PONG) {
-          if (heartbeatTimeoutTimer !== null) {
-            window.clearTimeout(heartbeatTimeoutTimer)
-            heartbeatTimeoutTimer = null
-          }
-          return
-        }
-
-        const message = parseProgressMessage(rawMessage)
+        const message = parseProgressMessage(String(event.data))
 
         if (!message) {
           return
@@ -652,8 +590,6 @@ function App() {
       if (stableConnectionTimer !== null) {
         window.clearTimeout(stableConnectionTimer)
       }
-
-      stopHeartbeat()
 
       if (progressSocket.current === socket) {
         progressSocket.current = null

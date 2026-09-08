@@ -1,57 +1,51 @@
-import { Hono, type Context } from 'hono';
-import { cors } from 'hono/cors';
-import { routePath } from 'hono/route';
-import { registerConnectionsRoutes } from './connections';
-import type { Bindings } from './env';
-import { handleDiscordInteraction } from './interactions';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { serve } from '@hono/node-server';
+import { createApp } from './app.ts';
+import { createUpgradeHandler } from './connections.ts';
+import { Database } from './db.ts';
+import { loadConfig, type AppEnv } from './env.ts';
+import { SocketHeartbeat } from './heartbeat.ts';
+import { RoomRegistry } from './rooms.ts';
 
-const SLOW_REQUEST_MS = 1000;
+// Comfortably inside the idle timeouts applied by Cloudflare's proxy and by Discord's,
+// neither of which is documented precisely.
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
-const app = new Hono<{ Bindings: Bindings }>();
+const port = Number(process.env.PORT ?? 8787);
+const databasePath = process.env.DATABASE_PATH ?? './data/connections.sqlite';
 
-// One event per request, carrying the matched route pattern rather than the concrete
-// path, so requests can be counted per endpoint without the cardinality of dates,
-// snowflakes and scope ids. Unmatched paths collapse into a single bucket, which is
-// what scanner traffic against the workers.dev hostname looks like. Worker fetch
-// invocations are thinned by observability.logs.head_sampling_rate, so this stays
-// cheap; count and scale by the inverse of that rate.
-app.use('*', async (c, next) => {
-  const startedAt = Date.now();
+mkdirSync(dirname(databasePath), { recursive: true });
 
-  try {
-    await next();
-  } finally {
-    const durationMs = Date.now() - startedAt;
+const config = loadConfig();
+const db = new Database(databasePath);
+const rooms = new RoomRegistry(db, config);
+const env: AppEnv = { config, db, rooms };
+const heartbeat = new SocketHeartbeat(HEARTBEAT_INTERVAL_MS).start();
 
-    console.log({
-      msg: 'request',
-      route: getRouteLabel(c),
-      method: c.req.method,
-      status: c.res.status,
-      durationMs,
-      isSlow: durationMs > SLOW_REQUEST_MS,
-    });
-  }
+const app = createApp(env);
+const handleUpgrade = createUpgradeHandler(env, heartbeat);
+
+const server = serve({ fetch: app.fetch, port }, (info) => {
+  console.log({ msg: 'server:listening', port: info.port, databasePath });
 });
 
-app.use('*', cors());
-app.get('/', (c) => c.text('Connections Discord Bot Server'));
-app.post('/interactions', handleDiscordInteraction);
+server.on('upgrade', (request, socket, head) => {
+  void handleUpgrade(request, socket, head).catch((error: unknown) => {
+    console.error('progress_ws:upgrade_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    socket.destroy();
+  });
+});
 
-registerConnectionsRoutes(app);
-
-export default app;
-
-export { ProgressRoom } from './session';
-
-function getRouteLabel(c: Context<{ Bindings: Bindings }>) {
-  try {
-    // A request that matches no route still runs the catch-all middleware, so it
-    // reports that middleware's own pattern. Name it, rather than leaving '/*' to be
-    // decoded in a dashboard.
-    const matchedRoute = routePath(c);
-    return !matchedRoute || matchedRoute === '/*' ? 'unmatched' : matchedRoute;
-  } catch {
-    return 'unmatched';
-  }
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(signal, () => {
+    console.log({ msg: 'server:shutting_down', signal });
+    heartbeat.stop();
+    server.close(() => {
+      db.close();
+      process.exit(0);
+    });
+  });
 }

@@ -1,46 +1,40 @@
-import { env } from 'cloudflare:workers';
-import type { ProgressRoom } from '../src/session';
+import { Database } from '../src/db.ts';
+import type { DiscordCredentials } from '../src/discord.ts';
+import { ProgressRoom } from '../src/session.ts';
+
+export const DATE = '2026-08-20';
+export const SCOPE_ID = 'guild:111111111111111111';
+export const CHANNEL_ID = '222222222222222222';
+
+export const TEST_CREDENTIALS: DiscordCredentials = {
+  clientId: '000000000000000000',
+  clientSecret: 'test-client-secret',
+};
 
 /**
- * The generated Env types PROGRESS_ROOMS as a bare DurableObjectNamespace, so stubs
- * come back opaque and runInDurableObject cannot see the instance type. Bindings in
- * src/env.ts carries the class, so re-apply it here rather than at every call site.
+ * An in-memory database per test. Durable Objects gave each guild its own storage and
+ * the test pool isolated it per file; a plain SQLite file has neither, so isolation is
+ * explicit here.
  */
-export function progressRoom(name: string) {
-  const namespace = env.PROGRESS_ROOMS as unknown as DurableObjectNamespace<ProgressRoom>;
-  return namespace.getByName(name);
+export function createTestDatabase() {
+  return new Database(':memory:');
 }
 
-/**
- * Total rows billed since the last reset. `sqlUsage` is the production
- * instrumentation added to diagnose the Durable Objects quota; reusing it here means
- * the tests assert against exactly the counter Cloudflare bills from.
- */
-export function rowsWritten(room: ProgressRoom) {
-  let total = 0;
-  for (const usage of room.sqlUsage.values()) {
-    total += usage.rowsWritten;
-  }
-  return total;
+export function createRoom(db: Database, scopeId = SCOPE_ID) {
+  return new ProgressRoom(scopeId, db, TEST_CREDENTIALS);
 }
 
-export function rowsWrittenForPrefix(room: ProgressRoom, prefix: string) {
-  let total = 0;
-  for (const [site, usage] of room.sqlUsage) {
-    if (site.startsWith(prefix)) {
-      total += usage.rowsWritten;
-    }
-  }
-  return total;
+export function callsFor(room: ProgressRoom, site: string) {
+  return room.sqlUsage.get(site)?.calls ?? 0;
+}
+
+export function changesFor(room: ProgressRoom, site: string) {
+  return room.sqlUsage.get(site)?.changes ?? 0;
 }
 
 export function resetUsage(room: ProgressRoom) {
   room.sqlUsage.clear();
 }
-
-export const DATE = '2026-08-20';
-export const SCOPE_ID = 'guild:111111111111111111';
-export const CHANNEL_ID = '222222222222222222';
 
 export const attachmentFor = (userId: string) => ({
   userId,
